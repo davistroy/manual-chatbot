@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from pipeline.chunk_assembly import (
+    TOKEN_ESTIMATE_FACTOR,
     Chunk,
     apply_rule_r1_primary_unit,
     apply_rule_r2_size_targets,
@@ -14,6 +15,7 @@ from pipeline.chunk_assembly import (
     apply_rule_r6_merge_small,
     apply_rule_r7_crossref_merge,
     apply_rule_r8_figure_continuity,
+    assemble_chunks,
     compose_hierarchical_header,
     count_tokens,
     detect_safety_callouts,
@@ -22,6 +24,7 @@ from pipeline.chunk_assembly import (
     tag_vehicle_applicability,
 )
 from pipeline.profile import load_profile
+from pipeline.structural_parser import Manifest, ManifestEntry
 
 
 # ── Token Counting Tests ──────────────────────────────────────────
@@ -44,6 +47,21 @@ class TestCountTokens:
         text = "Line one with words.\nLine two with more words."
         count = count_tokens(text)
         assert count >= 8
+
+    def test_scaling_factor_applied(self, monkeypatch):
+        """Verify TOKEN_ESTIMATE_FACTOR scales the count."""
+        import pipeline.chunk_assembly as ca
+
+        text = "one two three four five"
+        baseline = count_tokens(text)
+        assert baseline == 5
+
+        monkeypatch.setattr(ca, "TOKEN_ESTIMATE_FACTOR", 2.0)
+        scaled = count_tokens(text)
+        assert scaled == baseline * 2
+
+    def test_default_scaling_factor_is_one(self):
+        assert TOKEN_ESTIMATE_FACTOR == 1.0
 
 
 # ── Hierarchical Header Tests ─────────────────────────────────────
@@ -394,3 +412,110 @@ class TestTagVehicleApplicability:
         )
         assert "M38A1" in tags["vehicle_models"]
         assert "M170" in tags["vehicle_models"]
+
+
+# ── Rule Ordering Guard Tests ────────────────────────────────────
+
+
+class TestRuleOrdering:
+    """Guard tests verifying that rule ordering preserves semantic integrity.
+
+    These tests exercise assemble_chunks() end-to-end to confirm that
+    semantic rules (R3, R4) run before size enforcement (R2), keeping
+    step sequences and safety callouts attached to their procedures.
+    """
+
+    def _make_manifest(self, manual_id: str, num_lines: int) -> Manifest:
+        """Build a minimal single-entry Manifest spanning all lines."""
+        entry = ManifestEntry(
+            chunk_id=f"{manual_id}::proc",
+            level=3,
+            level_name="procedure",
+            title="Test Procedure",
+            hierarchy_path=["Test Group", "Test Section", "Test Procedure"],
+            content_type="procedure",
+            page_range={"start": "1", "end": "1"},
+            line_range={"start": 0, "end": num_lines},
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id=None,
+            children=[],
+        )
+        return Manifest(manual_id=manual_id, entries=[entry])
+
+    def test_safety_callout_not_split_from_procedure(self, xj_profile_path):
+        """A WARNING callout must remain in the same chunk as its procedure.
+
+        If R2 ran before R4, the size splitter could place the WARNING
+        in one chunk and the procedure steps in another.
+        """
+        profile = load_profile(xj_profile_path)
+
+        page_text = (
+            "WARNING: DO NOT REMOVE THE RADIATOR CAP WHILE THE\n"
+            "ENGINE IS HOT. SCALDING COOLANT AND STEAM CAN CAUSE\n"
+            "SERIOUS BURNS TO THE SKIN AND EYES.\n"
+            "\n"
+            "(1) Allow the engine to cool completely.\n"
+            "(2) Place a rag over the radiator cap.\n"
+            "(3) Slowly rotate the cap to the first stop.\n"
+            "(4) Allow residual pressure to escape.\n"
+            "(5) Press down and rotate the cap to remove."
+        )
+
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+        manifest = self._make_manifest("xj-1999", num_lines)
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+
+        # Find the chunk(s) containing the WARNING text
+        warning_chunks = [c for c in chunks if "WARNING:" in c.text]
+        assert len(warning_chunks) >= 1, "WARNING callout must appear in output"
+
+        # The WARNING and procedure steps must co-exist in the same chunk
+        for wc in warning_chunks:
+            assert "(1)" in wc.text, (
+                "WARNING callout was split from its procedure steps — "
+                "R4 (safety attachment) must run before R2 (size targets)"
+            )
+
+    def test_step_sequence_preserved_before_size_split(self, xj_profile_path):
+        """A numbered step sequence under the size ceiling stays in one chunk.
+
+        If R2 ran before R3, it could split at an arbitrary token boundary
+        inside a step sequence, breaking the procedure's logical continuity.
+        """
+        profile = load_profile(xj_profile_path)
+
+        # Build a 10-step sequence. Each step is ~10 words, so the whole
+        # sequence is ~100 words — well under the 2000-token ceiling.
+        steps = "\n".join(
+            f"({i}) Perform step {i} of the oil change procedure carefully."
+            for i in range(1, 11)
+        )
+        page_text = f"OIL CHANGE PROCEDURE\n\n{steps}"
+
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+        manifest = self._make_manifest("xj-1999", num_lines)
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+
+        # Find the chunk that contains step (1)
+        step_chunks = [c for c in chunks if "(1)" in c.text]
+        assert len(step_chunks) == 1, "Step (1) should appear in exactly one chunk"
+
+        # All 10 steps must be in that same chunk
+        the_chunk = step_chunks[0]
+        for i in range(1, 11):
+            assert f"({i})" in the_chunk.text, (
+                f"Step ({i}) was split from the sequence — "
+                "R3 (never split steps) must run before R2 (size targets)"
+            )

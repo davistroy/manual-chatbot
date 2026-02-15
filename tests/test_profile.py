@@ -8,8 +8,11 @@ from pathlib import Path
 import pytest
 
 from pipeline.profile import (
+    CURRENT_SCHEMA_VERSION,
+    GarbageDetectionConfig,
     HierarchyLevel,
     ManualProfile,
+    OcrCleanupConfig,
     SafetyCallout,
     Vehicle,
     VehicleEngine,
@@ -36,6 +39,10 @@ class TestLoadProfile:
     def test_load_xj_profile_title(self, xj_profile_path: Path):
         profile = load_profile(xj_profile_path)
         assert profile.manual_title == "1999 Jeep Cherokee (XJ) Factory Service Manual"
+
+    def test_load_xj_profile_schema_version(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert profile.schema_version == "1.0"
 
     def test_load_xj_profile_source_format(self, xj_profile_path: Path):
         profile = load_profile(xj_profile_path)
@@ -179,22 +186,22 @@ class TestLoadProfileOCRCleanup:
 
     def test_xj_ocr_quality_estimate(self, xj_profile_path: Path):
         profile = load_profile(xj_profile_path)
-        assert profile.ocr_cleanup["quality_estimate"] == "fair"
+        assert profile.ocr_cleanup.quality_estimate == "fair"
 
     def test_xj_known_substitutions(self, xj_profile_path: Path):
         profile = load_profile(xj_profile_path)
-        subs = profile.ocr_cleanup["known_substitutions"]
+        subs = profile.ocr_cleanup.known_substitutions
         assert len(subs) == 2
         assert subs[0]["from"] == "IJURY"
         assert subs[0]["to"] == "INJURY"
 
     def test_tm9_poor_quality(self, tm9_profile_path: Path):
         profile = load_profile(tm9_profile_path)
-        assert profile.ocr_cleanup["quality_estimate"] == "poor"
+        assert profile.ocr_cleanup.quality_estimate == "poor"
 
     def test_tm9_garbage_threshold(self, tm9_profile_path: Path):
         profile = load_profile(tm9_profile_path)
-        assert profile.ocr_cleanup["garbage_detection"]["threshold"] == 0.3
+        assert profile.ocr_cleanup.garbage_detection.threshold == 0.3
 
 
 # ── Validation Tests ──────────────────────────────────────────────
@@ -237,6 +244,109 @@ class TestValidateProfile:
         profile = load_profile(invalid_profile_path)
         errors = validate_profile(profile)
         assert any("source_format" in e or "format" in e.lower() for e in errors)
+
+
+class TestSchemaVersion:
+    """Test schema version validation."""
+
+    def test_missing_schema_version_is_error(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.schema_version = ""
+        errors = validate_profile(profile)
+        assert any("schema_version" in e for e in errors)
+
+    def test_wrong_schema_version_is_error(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.schema_version = "2.0"
+        errors = validate_profile(profile)
+        assert any("schema_version" in e for e in errors)
+        assert any("2.0" in e for e in errors)
+
+    def test_correct_schema_version_passes(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert profile.schema_version == CURRENT_SCHEMA_VERSION
+        errors = validate_profile(profile)
+        assert not any("schema_version" in e for e in errors)
+
+    def test_all_fixtures_have_schema_version(
+        self, xj_profile_path: Path, cj_profile_path: Path, tm9_profile_path: Path
+    ):
+        for path in [xj_profile_path, cj_profile_path, tm9_profile_path]:
+            profile = load_profile(path)
+            assert profile.schema_version == CURRENT_SCHEMA_VERSION
+
+
+class TestExpandedValidation:
+    """Test expanded validation checks (regex, substitutions, hierarchy, callouts)."""
+
+    def test_invalid_regex_in_hierarchy_id_pattern(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.hierarchy[0].id_pattern = "[invalid("
+        errors = validate_profile(profile)
+        assert any("id_pattern at hierarchy level 1" in e for e in errors)
+
+    def test_invalid_regex_in_step_pattern(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.step_patterns = ["[bad("]
+        errors = validate_profile(profile)
+        assert any("step_patterns[0]" in e for e in errors)
+
+    def test_invalid_regex_in_safety_callout(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.safety_callouts[0].pattern = "[bad("
+        errors = validate_profile(profile)
+        assert any("safety callout pattern" in e for e in errors)
+
+    def test_valid_patterns_pass(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert not any("Invalid" in e for e in errors)
+
+    def test_malformed_substitution_missing_from(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.known_substitutions = [{"to": "INJURY"}]
+        errors = validate_profile(profile)
+        assert any("known_substitutions[0]" in e for e in errors)
+
+    def test_malformed_substitution_missing_to(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.known_substitutions = [{"from": "IJURY"}]
+        errors = validate_profile(profile)
+        assert any("known_substitutions[0]" in e for e in errors)
+
+    def test_valid_substitutions_pass(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert not any("known_substitutions" in e for e in errors)
+
+    def test_non_sequential_hierarchy_levels(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.hierarchy[1].level = 5  # gap: 1, 5, 3, 4
+        errors = validate_profile(profile)
+        assert any("sequential" in e.lower() for e in errors)
+
+    def test_sequential_hierarchy_passes(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert not any("sequential" in e.lower() for e in errors)
+
+    def test_invalid_safety_callout_level(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.safety_callouts.append(SafetyCallout(level="danger", pattern="^DANGER:", style="block"))
+        errors = validate_profile(profile)
+        assert any("callout level 'danger'" in e for e in errors)
+
+    def test_invalid_safety_callout_style(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        profile.safety_callouts.append(SafetyCallout(level="warning", pattern="^WARNING:", style="floating"))
+        errors = validate_profile(profile)
+        assert any("callout style 'floating'" in e for e in errors)
+
+    def test_valid_callout_levels_and_styles_pass(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert not any("callout level" in e for e in errors)
+        assert not any("callout style" in e for e in errors)
 
 
 # ── Pattern Compilation Tests ─────────────────────────────────────

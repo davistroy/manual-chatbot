@@ -1,4 +1,5 @@
 # Intentionally invalid profile — missing required fields for validation testing
+schema_version: "1.0"
 manual_id: "invalid"
 manual_title: ""
 # source_url: missing
