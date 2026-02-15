@@ -4,7 +4,7 @@
 
 Smart Chunking Pipeline for Vehicle Service Manual RAG. Processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot.
 
-**Current state**: Fully implemented — all 229 tests pass. The codebase was built TDD-style: tests were written first as the specification, then all source functions were implemented.
+**Current state**: Fully implemented — all 250 tests pass. The codebase was built TDD-style: tests were written first as the specification, then all source functions were implemented. Profile schema is versioned (v1.0) with typed dataclasses and expanded validation.
 
 ## Quick Reference
 
@@ -26,6 +26,8 @@ pytest -v --tb=short
 ## Code Layout
 
 ```
+schema/                # JSON Schema for profile YAML format
+  manual_profile_v1.schema.json
 src/pipeline/          # All source code
   profile.py           # YAML profile loading, validation, pattern compilation
   structural_parser.py # Boundary detection, manifest building
@@ -36,7 +38,7 @@ src/pipeline/          # All source code
   qa.py                # 7-check validation suite
   cli.py               # CLI entry point (process, bootstrap-profile, validate, qa)
 
-tests/                 # Test suite (229 tests)
+tests/                 # Test suite (250 tests)
   conftest.py          # Shared fixtures — profile paths, sample texts, chunk helpers
   fixtures/            # YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid)
   test_*.py            # One test file per source module
@@ -53,7 +55,11 @@ Four-stage pipeline, each driven by a YAML manual profile:
 
 ## Key Data Types
 
-- `ManualProfile` (profile.py) — Loaded from YAML, contains hierarchy patterns, vehicle info, OCR rules, safety callout patterns
+- `ManualProfile` (profile.py) — Loaded from YAML, contains hierarchy patterns, vehicle info, OCR rules, safety callout patterns. Schema versioned (`schema_version: "1.0"`)
+- `OcrCleanupConfig` (profile.py) — Typed OCR cleanup configuration (quality_estimate, known_substitutions, header_footer_patterns, garbage_detection)
+- `GarbageDetectionConfig` (profile.py) — Garbage line detection parameters (enabled, threshold)
+- `ContentTypeConfig` (profile.py) — Content type metadata (maintenance_schedule, wiring_diagrams, specification_tables)
+- `VariantConfig` (profile.py) — Market variant configuration (has_market_variants, variant_indicator, markets)
 - `Boundary` (structural_parser.py) — Detected structural boundary with level, ID, title, page/line
 - `Manifest` / `ManifestEntry` (structural_parser.py) — Hierarchical document map with chunk boundaries
 - `CleanedPage` (ocr_cleanup.py) — Cleaned page with original text, cleaned text, garbage lines, substitution count

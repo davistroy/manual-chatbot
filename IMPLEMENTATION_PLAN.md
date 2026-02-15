@@ -2,1150 +2,482 @@
 
 **Generated:** 2026-02-15
 **Source Documents:**
-- `PRD.pdf` — Product Requirements Document (30 pages, ~15,000 words)
-- `README.md` — Project overview and architecture summary
-- `CLAUDE.md` — Developer guide and conventions
-- `tests/` — 229 TDD tests across 8 test files defining all expected behavior
-- `tests/fixtures/` — 4 YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid)
+- Conversation analysis of three architectural decisions needing documentation
+- `src/pipeline/chunk_assembly.py` (rule ordering, token counting)
+- `src/pipeline/profile.py` (schema definition, validation, loading)
+- `tests/fixtures/*.yaml` (4 profile fixtures)
+- `LEARNINGS.md` (existing decision notes)
 
-**Total Phases:** 6
-**Estimated Total Effort:** ~300,000 tokens
+**Total Phases:** 3
+**Estimated Total Effort:** ~45,000 tokens
 
 ---
 
 ## Executive Summary
 
-This project implements a Smart Chunking Pipeline for Vehicle Service Manual RAG. It processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot. The pipeline is profile-driven: each manual gets a YAML profile that configures OCR cleanup, structural parsing, chunk assembly, and metadata tagging.
+Three architectural decisions in the chunking pipeline are undocumented or insufficiently documented, creating maintenance risk. The rule ordering in `assemble_chunks()` is intentionally non-sequential but appears wrong to anyone unfamiliar with the rationale. The `count_tokens()` function uses word-split as a deliberate dependency tradeoff but looks like a shortcut. The YAML profile schema — the system's core extension point — has no version marker, no formal schema definition, and minimal validation despite affecting all manual profiles and all 229 tests.
 
-The codebase was built in a TDD framework style — 229 tests in `tests/` fully defined expected behavior and served as the implementation specification. All functions are now implemented and all tests pass. The implementation strategy follows the pipeline's natural data flow: profile loading, OCR cleanup, structural parsing, chunk assembly, embedding/indexing, retrieval/QA/CLI.
-
-Three target manuals drive all test fixtures: 1999 Jeep Cherokee XJ (modern, 4-level hierarchy), 1953-71 CJ Universal (classic, 3-level), and TM 9-8014 M38A1 (military, 3-level). Each has fundamentally different document conventions, making the profile-driven approach essential.
+This plan addresses all three with source-level documentation, a JSON Schema for the profile format, typed dataclasses for the currently-untyped dict fields, expanded validation, and a guard test for rule ordering.
 
 ---
 
 ## Plan Overview
 
-The implementation follows the pipeline's four-stage architecture plus the retrieval and quality layers. Each phase builds on the previous, and each phase leaves the codebase in a testable state with its corresponding tests passing.
-
-The critical path is strictly sequential: Profile, OCR, Structural, Chunks, Embeddings, Retrieval, QA, CLI. However, within phases, many work items are parallelizable (e.g., individual chunk rules R1-R8 are independent).
+The three items are independent and can be implemented in any order. They are sequenced by risk (schema stability first, as it has the highest blast radius) and by complexity (documentation-only changes last).
 
 ### Phase Summary Table
 
 | Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies |
 |-------|------------|------------------|-------------|--------------|
-| 1 | Profile System | YAML loader, validator, pattern compiler | ~40K | None |
-| 2 | OCR Cleanup | Substitutions, header stripping, garbage detection, unicode | ~45K | Phase 1 |
-| 3 | Structural Parsing | Boundary detection, manifest building, chunk IDs | ~50K | Phase 1 |
-| 4 | Chunk Assembly Engine | Rules R1-R8, vehicle tagging, metadata composition | ~80K | Phases 1, 3 |
-| 5 | Embedding and Retrieval | Embedding composition, SQLite index, query analysis, reranking | ~50K | Phases 1, 4 |
-| 6 | QA Validation and CLI | 7-check validation suite, CLI argument parser, subcommands | ~35K | All previous |
+| 1 | Profile Schema Stability | Version marker, JSON Schema, typed dicts, expanded validation | ~30K | None |
+| 2 | Token Counting Documentation | Docstring, scaling constant, accuracy notes | ~5K | None |
+| 3 | Rule Ordering Documentation | Inline comment block, ordering guard test | ~10K | None |
 
 ---
 
-## Phase 1: Profile System
+## Phase 1: Profile Schema Stability
 
-**Estimated Effort:** ~40,000 tokens (including testing/fixes)
+**Estimated Effort:** ~30,000 tokens (including testing/fixes)
 **Dependencies:** None
-**Parallelizable:** Yes — work items 1.1, 1.2, 1.3 have some independence but share the ManualProfile dataclass
+**Parallelizable:** Work items 1.1-1.4 are sequential; 1.5 can run after 1.3
 
 ### Goals
 
-- Load YAML manual profiles into typed `ManualProfile` dataclasses with nested vehicle, hierarchy, and safety structures
-- Validate profiles for completeness and correctness
-- Pre-compile regex patterns from profile strings for runtime performance
+- Establish a versioned profile schema so future changes are detectable
+- Replace `dict[str, Any]` fields with typed dataclasses for compile-time safety
+- Expand `validate_profile()` to catch malformed regexes and missing OCR fields
+- Create a JSON Schema file that serves as machine-readable documentation
 
 ### Work Items
 
-#### 1.1 Implement `load_profile()`
+#### 1.1 Add `schema_version` field to ManualProfile and all YAML fixtures
 
-**Requirement Refs:** PRD 3.1 (Profile Schema), PRD 3.2-3.4 (Manual Profiles)
+**Requirement Refs:** Architectural Decision #3
 **Files Affected:**
-- `src/pipeline/profile.py` (modify)
+- `src/pipeline/profile.py` (modify — add field to dataclass, update loader and validator)
+- `tests/fixtures/xj_1999_profile.yaml` (modify — add `schema_version: "1.0"`)
+- `tests/fixtures/cj_universal_profile.yaml` (modify — add `schema_version: "1.0"`)
+- `tests/fixtures/tm9_8014_profile.yaml` (modify — add `schema_version: "1.0"`)
+- `tests/fixtures/invalid_profile.yaml` (modify — add `schema_version: "1.0"` so it remains testable for other invalid fields)
+- `tests/test_profile.py` (modify — add schema version tests)
 
 **Description:**
-Load a YAML file from disk and map it into the `ManualProfile` dataclass. This involves parsing nested YAML structures into the already-defined dataclasses: `Vehicle`, `VehicleEngine`, `VehicleTransmission`, `HierarchyLevel`, `SafetyCallout`. The function must handle string and `Path` inputs, raise `FileNotFoundError` for missing files, and correctly extract all fields from the three different profile formats (XJ, CJ, TM9).
+Add a `schema_version: str` field to `ManualProfile` (after `manual_id`). Define a module-level constant `CURRENT_SCHEMA_VERSION = "1.0"`. Update `load_profile()` to read the field from YAML data. Update `validate_profile()` to check that `schema_version` is present and matches `CURRENT_SCHEMA_VERSION`.
 
 **Tasks:**
-1. [ ] Read YAML file using `pyyaml` and parse into dict
-2. [ ] Map `vehicles` list to `Vehicle` dataclasses with nested `VehicleEngine` and `VehicleTransmission`
-3. [ ] Map `structure.hierarchy` list to `HierarchyLevel` dataclasses with `known_ids`
-4. [ ] Map `safety_callouts` list to `SafetyCallout` dataclasses
-5. [ ] Extract flat fields: `manual_id`, `manual_title`, `source_url`, `source_format`
-6. [ ] Extract `page_number_pattern`, `step_patterns`, `figure_reference_pattern/scope`, `cross_reference_patterns`
-7. [ ] Pass-through `content_types`, `ocr_cleanup`, `variants` as dicts
-8. [ ] Handle `FileNotFoundError` for missing paths
-9. [ ] Accept both `str` and `Path` arguments
+1. [ ] Add `CURRENT_SCHEMA_VERSION = "1.0"` constant to `profile.py`
+2. [ ] Add `schema_version: str` field to `ManualProfile` dataclass
+3. [ ] Update `load_profile()` to extract `schema_version` from YAML data (line ~165)
+4. [ ] Update `validate_profile()` to error on missing or mismatched version (line ~189)
+5. [ ] Add `schema_version: "1.0"` as first line of all 4 YAML fixtures
+6. [ ] Update existing tests that construct `ManualProfile` directly (if any)
+7. [ ] Add tests: missing version raises error, wrong version raises error, correct version passes
 
 **Acceptance Criteria:**
-- [ ] All 8 tests in `TestLoadProfile` pass
-- [ ] All 11 tests in `TestLoadProfileVehicles` pass
-- [ ] All 7 tests in `TestLoadProfileHierarchy` pass
-- [ ] All 4 tests in `TestLoadProfileSafetyCallouts` pass
-- [ ] All 4 tests in `TestLoadProfileOCRCleanup` pass
-- [ ] Profiles for all 3 manuals (XJ, CJ, TM9) load correctly
-- [ ] Invalid/missing profiles raise appropriate errors
+- [ ] All profiles load with `schema_version: "1.0"`
+- [ ] `validate_profile()` returns error for missing `schema_version`
+- [ ] `validate_profile()` returns error for `schema_version: "2.0"` (unknown)
+- [ ] All 229 existing tests still pass
+
+---
+
+#### 1.2 Type the `content_types`, `ocr_cleanup`, and `variants` dicts
+
+**Requirement Refs:** Architectural Decision #3
+**Files Affected:**
+- `src/pipeline/profile.py` (modify — add 4 new dataclasses, update ManualProfile fields, update `load_profile()`)
+- `src/pipeline/ocr_cleanup.py` (modify — update field access from dict syntax to attribute syntax)
+- `tests/test_profile.py` (modify — update field access assertions)
+- `tests/test_ocr_cleanup.py` (modify — update field access if any)
+- `tests/test_chunk_assembly.py` (modify — update if any dict-style access)
+
+**Description:**
+Replace the three `dict[str, Any]` fields on `ManualProfile` with proper dataclasses. This makes the schema self-documenting and catches typos at load time.
+
+New dataclasses:
+
+```python
+@dataclass
+class ContentTypeConfig:
+    """Content type metadata — sub-fields remain dicts because structure
+    varies fundamentally across manual types (mileage-bands vs echelon-based
+    vs interval-table)."""
+    maintenance_schedule: dict[str, Any] = field(default_factory=dict)
+    wiring_diagrams: dict[str, Any] = field(default_factory=dict)
+    specification_tables: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class GarbageDetectionConfig:
+    """Garbage line detection parameters."""
+    enabled: bool = False
+    threshold: float = 0.5
+
+@dataclass
+class OcrCleanupConfig:
+    """OCR cleanup configuration from manual profile."""
+    quality_estimate: str = ""
+    known_substitutions: list[dict[str, str]] = field(default_factory=list)
+    header_footer_patterns: list[str] = field(default_factory=list)
+    garbage_detection: GarbageDetectionConfig = field(default_factory=GarbageDetectionConfig)
+
+@dataclass
+class VariantConfig:
+    """Market variant configuration."""
+    has_market_variants: bool = False
+    variant_indicator: str = "none"
+    markets: list[str] = field(default_factory=list)
+```
+
+**Tasks:**
+1. [ ] Define `GarbageDetectionConfig` dataclass in `profile.py`
+2. [ ] Define `OcrCleanupConfig` dataclass in `profile.py`
+3. [ ] Define `ContentTypeConfig` dataclass in `profile.py`
+4. [ ] Define `VariantConfig` dataclass in `profile.py`
+5. [ ] Update `ManualProfile` field types: `content_types: ContentTypeConfig`, `ocr_cleanup: OcrCleanupConfig`, `variants: VariantConfig`
+6. [ ] Update `load_profile()` to construct these dataclasses from YAML data
+7. [ ] Search all source files for dict-style access to these fields (e.g., `profile.ocr_cleanup["quality_estimate"]`) and update to attribute syntax
+8. [ ] Search all test files for the same and update
+9. [ ] Verify the `invalid_profile.yaml` fixture still loads correctly (it has empty/default values for these sections)
+
+**Acceptance Criteria:**
+- [ ] `ManualProfile` no longer has any `dict[str, Any]` top-level fields
+- [ ] All 3 valid profile fixtures load into typed dataclasses without error
+- [ ] Field access uses attribute syntax (`profile.ocr_cleanup.quality_estimate`) not dict syntax
+- [ ] All 229 tests pass
 
 **Notes:**
-- Dataclasses are already fully defined in `profile.py` — implementation is purely the loading/mapping logic
-- YAML test fixtures in `tests/fixtures/` are simplified versions of the full PRD profiles
-- Pay attention to field naming: YAML uses `snake_case` and nested dicts that must map to specific dataclass fields
+`ContentTypeConfig` sub-fields (`maintenance_schedule`, `wiring_diagrams`, `specification_tables`) remain `dict[str, Any]` because their structure varies fundamentally across manual types. Typing these further would over-constrain the schema for no safety gain.
 
 ---
 
-#### 1.2 Implement `validate_profile()`
+#### 1.3 Expand `validate_profile()` with structural checks
 
-**Requirement Refs:** PRD 3.1 (Profile Schema validation)
+**Requirement Refs:** Architectural Decision #3
 **Files Affected:**
-- `src/pipeline/profile.py` (modify)
+- `src/pipeline/profile.py` (modify — expand `validate_profile()` at line 184)
+- `tests/test_profile.py` (modify — add validation tests to `TestValidateProfile` class)
 
 **Description:**
-Validate a loaded `ManualProfile` for required fields and structural correctness. Return a list of validation error strings (empty list = valid). Check for non-empty `manual_id`, non-empty `vehicles` list, non-empty `hierarchy`, and valid `source_format`.
+The current validator checks 6 fields for non-emptiness. Expand it to catch the errors that actually happen when authoring new profiles:
+
+1. **Regex compilation** — validate that all `id_pattern`, `title_pattern`, step patterns, safety callout patterns, figure reference, cross-reference, and page number patterns compile as valid regex
+2. **OCR cleanup structure** — validate `known_substitutions` entries have `from` and `to` keys
+3. **Hierarchy consistency** — validate hierarchy levels are sequential (1, 2, 3...) with no gaps
+4. **Safety callout levels** — validate callout levels are one of `{"warning", "caution", "note"}`
+5. **Safety callout styles** — validate styles are one of `{"block", "inline"}`
 
 **Tasks:**
-1. [ ] Check `manual_id` is non-empty string
-2. [ ] Check `manual_title` is non-empty string
-3. [ ] Check `vehicles` list is non-empty
-4. [ ] Check `hierarchy` list is non-empty
-5. [ ] Check `source_format` is a recognized format
-6. [ ] Return list of error message strings
+1. [ ] Add regex validation for all pattern fields (try `re.compile()`, catch `re.error`)
+2. [ ] Add `known_substitutions` structure validation (each entry must have `from` and `to` keys)
+3. [ ] Add hierarchy level sequence validation (levels must be 1, 2, 3... with no gaps)
+4. [ ] Add safety callout level validation (must be `warning`, `caution`, or `note`)
+5. [ ] Add safety callout style validation (must be `block` or `inline`)
+6. [ ] Write tests for each new validation check (valid patterns pass, invalid patterns caught)
+7. [ ] Write test with a profile containing an invalid regex pattern
+8. [ ] Write test with a profile containing malformed substitution entries
 
 **Acceptance Criteria:**
-- [ ] Valid profiles (XJ, CJ, TM9) return empty list
-- [ ] Invalid profile returns non-empty list with descriptive errors
-- [ ] Each validation failure produces a clear error message
+- [ ] Invalid regex patterns produce clear validation errors (e.g., `"Invalid id_pattern at hierarchy level 1: ..."`)
+- [ ] Malformed `known_substitutions` entries produce validation errors
+- [ ] Non-sequential hierarchy levels produce validation errors
+- [ ] Invalid safety callout levels/styles produce validation errors
+- [ ] All valid profiles still pass validation (XJ, CJ, TM9)
+- [ ] All 229+ tests pass
 
 ---
 
-#### 1.3 Implement `compile_patterns()`
+#### 1.4 Create JSON Schema definition file
 
-**Requirement Refs:** PRD 4.3.1 (Header Detection), PRD 3.1 (pattern fields)
+**Requirement Refs:** Architectural Decision #3
 **Files Affected:**
-- `src/pipeline/profile.py` (modify)
+- `schema/manual_profile_v1.schema.json` (create)
 
 **Description:**
-Pre-compile all regex pattern strings from a `ManualProfile` into `re.Pattern` objects for runtime performance. Return a dict keyed by pattern category: `"hierarchy"`, `"step"`, `"safety"`, `"figure"`, `"cross_reference"`. Each value is a list of compiled `re.Pattern` objects.
+Create a JSON Schema (draft 2020-12) that formally defines the YAML profile structure. This serves as:
+- Machine-readable documentation of the profile format
+- IDE autocompletion support (VS Code YAML extension reads JSON Schema)
+- A validation reference independent of the Python code
+
+The schema should document every field, type, required/optional status, enum values, and pattern constraints. Include a `description` on non-obvious fields explaining their purpose.
 
 **Tasks:**
-1. [ ] Compile `hierarchy[].id_pattern` and `hierarchy[].title_pattern` for each level
-2. [ ] Compile `step_patterns` list
-3. [ ] Compile `safety_callouts[].pattern` for each callout level
-4. [ ] Compile `figure_reference_pattern`
-5. [ ] Compile `cross_reference_patterns` list
-6. [ ] Return dict with categorized compiled patterns
-7. [ ] Handle `None` patterns gracefully (skip compilation)
+1. [ ] Create `schema/` directory in project root
+2. [ ] Write JSON Schema covering all top-level fields (`schema_version`, `manual_id`, `manual_title`, `source_url`, `source_format`, `vehicles`, `structure`, `safety_callouts`, `content_types`, `ocr_cleanup`, `variants`)
+3. [ ] Define `vehicles` array schema with nested `engines` and `transmissions`
+4. [ ] Define `structure.hierarchy` array schema with `level`, `name`, `id_pattern`, `title_pattern`, `known_ids`
+5. [ ] Define `safety_callouts` array schema with enum constraints on `level` and `style`
+6. [ ] Define `ocr_cleanup` object schema with `garbage_detection` sub-object
+7. [ ] Add enum constraints: `source_format` in `["pdf-ocr", "pdf-native", "html", "epub"]`, `safety level` in `["warning", "caution", "note"]`, `safety style` in `["block", "inline"]`, `figure_reference_scope` in `["per-section", "global"]`
+8. [ ] Add `required` arrays for mandatory fields at each nesting level
+9. [ ] Validate all 3 valid fixture profiles against the schema (manual spot-check)
 
 **Acceptance Criteria:**
-- [ ] All 8 tests in `TestCompilePatterns` pass
-- [ ] Step patterns match numbered `(1)` and lettered `a.` formats
-- [ ] Safety patterns match `WARNING:`, `CAUTION:`, `NOTE:` formats
-- [ ] Hierarchy patterns match chapter/section/group titles per manual format
+- [ ] Schema file exists at `schema/manual_profile_v1.schema.json`
+- [ ] All 3 valid fixture profiles conform to the schema
+- [ ] Schema documents every field present in the YAML fixtures
+- [ ] Enum constraints match the validation logic in `validate_profile()`
+- [ ] Schema includes `description` on key fields
+
+**Notes:**
+Do not add `jsonschema` as a runtime dependency. The schema file is documentation and tooling support. If schema validation is desired at runtime, it can be added as an optional dependency later.
 
 ---
 
 ### Phase 1 Testing Requirements
 
-- [x] `pytest tests/test_profile.py` — all 48 tests pass
-- [x] All 3 manual profiles load without errors
-- [x] Invalid profile correctly caught by validation
-- [x] Compiled patterns match expected text fragments from test fixtures
+- [ ] All existing 229 tests pass (with field access updates from 1.2)
+- [ ] New validation tests cover: regex compilation, substitution structure, hierarchy sequence, callout level/style
+- [ ] Schema version tests cover: missing version, wrong version, correct version
+- [ ] `load_profile()` correctly constructs typed dataclasses from all 4 fixtures
 
 ### Phase 1 Completion Checklist
 
-- [x] All work items complete
-- [x] All 48 profile tests passing
-- [x] No regressions introduced
-- [x] `ManualProfile` dataclass correctly populated for all 3 target manuals
+- [ ] All work items complete
+- [ ] All tests passing (`pytest -v --tb=short`)
+- [ ] `CLAUDE.md` Key Data Types section updated with `OcrCleanupConfig`, `VariantConfig`, `ContentTypeConfig`, `GarbageDetectionConfig`
+- [ ] No regressions introduced
+- [ ] `LEARNINGS.md` updated if any surprises encountered
 
 ---
 
-## Phase 2: OCR Cleanup Pipeline
+## Phase 2: Token Counting Documentation
 
-**Estimated Effort:** ~45,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (ManualProfile for profile-driven cleanup)
-**Parallelizable:** Yes — work items 2.1-2.4 are independent utility functions; 2.5-2.6 integrate them
+**Estimated Effort:** ~5,000 tokens (including testing/fixes)
+**Dependencies:** None
+**Parallelizable:** Yes — independent of Phases 1 and 3
 
 ### Goals
 
-- Apply profile-specific OCR substitutions to correct scan artifacts
-- Strip headers/footers using profile regex patterns, extracting page numbers
-- Detect garbage lines by non-ASCII density threshold
-- Normalize unicode (smart quotes, ligatures, whitespace)
-- Compose the full page cleanup pipeline and quality assessment
+- Document the word-split vs. BPE tokenizer tradeoff at the point of use
+- Make the implicit 1:1 word-to-token ratio explicit and tunable
+- Provide a clear upgrade path for future precision needs
 
 ### Work Items
 
-#### 2.1 Implement `apply_known_substitutions()`
+#### 2.1 Expand `count_tokens()` with documented tradeoff and scaling constant
 
-**Requirement Refs:** PRD 4.2.2 (OCR Cleanup, step 1)
+**Requirement Refs:** Architectural Decision #2
 **Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
+- `src/pipeline/chunk_assembly.py` (modify — lines 22-29)
+- `tests/test_chunk_assembly.py` (modify — add test for scaling factor behavior)
 
 **Description:**
-Apply a list of `{from, to}` substitution pairs to the input text. Each substitution is a simple string find-and-replace (case-sensitive). All occurrences of each `from` string are replaced with the `to` string. Substitutions are applied in order.
+Replace the minimal docstring on `count_tokens()` with a full explanation of the design decision. Extract the implicit 1:1 word-to-token ratio as a named module constant `TOKEN_ESTIMATE_FACTOR` so it's visible and tunable.
+
+Current implementation (lines 22-29):
+```python
+def count_tokens(text: str) -> int:
+    """Estimate token count for a text string.
+
+    Uses a simple whitespace-based approximation.
+    """
+    if not text or not text.strip():
+        return 0
+    return len(text.split())
+```
+
+Target implementation:
+```python
+# Word-to-token scaling factor. Set to 1.0 because word count approximates
+# token count for English prose. Actual BPE ratio is ~1.3x for technical
+# English, meaning this intentionally undercounts — chunks may be ~30% larger
+# than the nominal 200-2000 token target. The error direction is safe for RAG
+# (slightly oversized chunks preserve more context per retrieval hit).
+#
+# To use a real tokenizer: swap the count_tokens() implementation for
+# tiktoken or sentencepiece, and set this factor to 1.0.
+TOKEN_ESTIMATE_FACTOR: float = 1.0
+
+
+def count_tokens(text: str) -> int:
+    """Estimate token count using whitespace word splitting.
+
+    Deliberate tradeoff: avoids a tokenizer dependency (tiktoken,
+    sentencepiece) at the cost of ~20-30% undercount vs actual BPE
+    tokens for technical English. Chunks may run ~30% larger than
+    the nominal 200-2000 token target defined in R2.
+
+    The error direction is safe for RAG — slightly oversized chunks
+    preserve more context per retrieval hit. If precision matters
+    (e.g., strict model context limits), swap this implementation
+    for a BPE tokenizer.
+    """
+    if not text or not text.strip():
+        return 0
+    return int(len(text.split()) * TOKEN_ESTIMATE_FACTOR)
+```
 
 **Tasks:**
-1. [ ] Iterate over substitution dicts, applying `text.replace(from, to)` for each
-2. [ ] Handle empty substitution list (return text unchanged)
-3. [ ] Handle special characters in substitution strings (smart quotes, split words)
-4. [ ] Return the modified text
+1. [ ] Add `TOKEN_ESTIMATE_FACTOR = 1.0` constant with explanatory comment block above `count_tokens()` (after the `Chunk` dataclass, before the function)
+2. [ ] Expand `count_tokens()` docstring with tradeoff rationale, accuracy implications, and upgrade path
+3. [ ] Update `return` statement to `return int(len(text.split()) * TOKEN_ESTIMATE_FACTOR)`
+4. [ ] Add test verifying `TOKEN_ESTIMATE_FACTOR` is applied: monkeypatch the constant to 2.0 and verify count doubles
+5. [ ] Verify all 4 existing `TestCountTokens` tests still pass (factor is 1.0, so `int(n * 1.0) == n`)
 
 **Acceptance Criteria:**
-- [ ] All 7 tests in `TestApplyKnownSubstitutions` pass
-- [ ] Multiple occurrences of same pattern all replaced
-- [ ] Case-sensitive replacement
-- [ ] Substitutions with special chars work correctly
-
----
-
-#### 2.2 Implement `strip_headers_footers()`
-
-**Requirement Refs:** PRD 4.2.2 (OCR Cleanup, step 2)
-**Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
-
-**Description:**
-Remove header and footer lines matching profile regex patterns. Extract page number/ID from headers before stripping. Return a tuple of `(cleaned_text, extracted_page_id)`. Also strip `(Continued)` markers.
-
-**Tasks:**
-1. [ ] Split text into lines
-2. [ ] Match each line against header/footer regex patterns
-3. [ ] Extract page number/ID from matching header lines (capture groups)
-4. [ ] Remove matching lines from text
-5. [ ] Strip `(Continued)` markers
-6. [ ] Return `(cleaned_text, extracted_page_id_or_None)`
-
-**Acceptance Criteria:**
-- [ ] All 6 tests in `TestStripHeadersFooters` pass
-- [ ] Headers removed, page numbers extracted
-- [ ] Footer page numbers stripped
-- [ ] Non-matching text preserved unchanged
-
----
-
-#### 2.3 Implement `detect_garbage_lines()`
-
-**Requirement Refs:** PRD 4.2.2 (OCR Cleanup, step 3)
-**Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
-
-**Description:**
-Flag lines exceeding a non-ASCII character density threshold. Return a list of 0-based line indices where the ratio of non-ASCII characters to total characters exceeds the threshold (e.g., 0.3 = 30%).
-
-**Tasks:**
-1. [ ] Split text into lines
-2. [ ] For each line, calculate ratio of non-ASCII characters
-3. [ ] Flag lines exceeding the threshold
-4. [ ] Return list of flagged line indices (0-based)
-5. [ ] Handle empty lines gracefully
-
-**Acceptance Criteria:**
-- [ ] All 5 tests in `TestDetectGarbageLines` pass
-- [ ] All-ASCII text returns empty list
-- [ ] Lines with high non-ASCII density correctly flagged
-- [ ] Threshold parameter respected
-
----
-
-#### 2.4 Implement `normalize_unicode()`
-
-**Requirement Refs:** PRD 4.2.2 (OCR Cleanup, step 4 — universal cleanup)
-**Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
-
-**Description:**
-Apply universal unicode normalization: smart quotes to straight quotes, ligature decomposition, whitespace normalization (collapse multiple spaces, normalize line breaks while preserving paragraph structure).
-
-**Tasks:**
-1. [ ] Replace smart double quotes (U+201C, U+201D) with straight `"`
-2. [ ] Replace smart single quotes (U+2018, U+2019) with straight `'`
-3. [ ] Decompose ligatures: U+FB01 to `fi`, U+FB02 to `fl`
-4. [ ] Collapse multiple spaces to single space
-5. [ ] Collapse 3+ consecutive newlines to 2 newlines
-6. [ ] Preserve single newlines
-
-**Acceptance Criteria:**
-- [ ] All 7 tests in `TestNormalizeUnicode` pass
-- [ ] Smart quotes normalized
-- [ ] Ligatures decomposed
-- [ ] Whitespace collapsed without destroying paragraph breaks
-
----
-
-#### 2.5 Implement `clean_page()`
-
-**Requirement Refs:** PRD 4.2 (Stage 1 pipeline)
-**Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
-
-**Description:**
-Full cleanup pipeline for a single page. Orchestrates: apply substitutions, strip headers/footers, detect garbage, normalize unicode. Returns a `CleanedPage` dataclass preserving the original text, cleaned text, extracted page ID, garbage line indices, and substitution count.
-
-**Tasks:**
-1. [ ] Store original text
-2. [ ] Apply `apply_known_substitutions()` using `profile.ocr_cleanup["known_substitutions"]`
-3. [ ] Count substitutions applied
-4. [ ] Apply `strip_headers_footers()` using `profile.ocr_cleanup["header_footer_patterns"]`
-5. [ ] Apply `detect_garbage_lines()` using `profile.ocr_cleanup["garbage_detection"]["threshold"]`
-6. [ ] Apply `normalize_unicode()`
-7. [ ] Return `CleanedPage` with all tracked metadata
-
-**Acceptance Criteria:**
-- [ ] All 10 tests in `TestCleanPage` pass (covering XJ, CJ, TM9 profiles)
-- [ ] Original text preserved in output
-- [ ] Substitution count tracked accurately
-- [ ] Garbage lines detected and reported
-- [ ] Page number extracted from headers
-
----
-
-#### 2.6 Implement `assess_quality()`
-
-**Requirement Refs:** PRD 4.2.3 (OCR Quality Assessment)
-**Files Affected:**
-- `src/pipeline/ocr_cleanup.py` (modify)
-
-**Description:**
-Run quality assessment on a list of `CleanedPage` objects. Sample up to `sample_size` pages (default 50), calculate dictionary match rate, garbage line rate, and determine if re-OCR is needed (dictionary match rate below 0.85).
-
-**Tasks:**
-1. [ ] Sample pages (up to `sample_size` from total)
-2. [ ] Calculate dictionary match rate (percentage of words matching English dictionary)
-3. [ ] Calculate garbage line rate
-4. [ ] Count suspected remaining OCR errors
-5. [ ] Set `needs_reocr` flag based on threshold
-6. [ ] Return `OCRQualityReport` dataclass
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestAssessQuality` pass
-- [ ] Dictionary match rate calculated correctly
-- [ ] `needs_reocr` flag set when quality is poor
-- [ ] Total and sampled page counts reported
+- [ ] `TOKEN_ESTIMATE_FACTOR` constant exists at module level and is documented
+- [ ] `count_tokens()` docstring explains the word-split vs. BPE tradeoff
+- [ ] Docstring mentions the ~20-30% undercount and why it's acceptable for RAG
+- [ ] Docstring provides upgrade path (what to change for precise counting)
+- [ ] `int()` wrapping handles non-integer results when factor != 1.0
+- [ ] All existing tests pass unchanged
 
 ---
 
 ### Phase 2 Testing Requirements
 
-- [x] `pytest tests/test_ocr_cleanup.py` — all 39 tests pass
-- [x] All 3 manual sample texts cleaned correctly
-- [x] Dirty OCR text fixture normalized properly
+- [ ] `count_tokens("hello world")` still returns 2 (factor = 1.0)
+- [ ] `count_tokens("")` and `count_tokens("   ")` still return 0
+- [ ] Scaling factor test confirms multiplication is applied
+- [ ] All 41 chunk assembly tests pass
 
 ### Phase 2 Completion Checklist
 
-- [x] All work items complete
-- [x] All 39 OCR cleanup tests passing
-- [x] All Phase 1 tests still passing (no regressions)
-- [x] CleanedPage objects preserve full audit trail
+- [ ] All work items complete
+- [ ] All tests passing
+- [ ] No regressions introduced
 
 ---
 
-## Phase 3: Structural Parsing
+## Phase 3: Rule Ordering Documentation
 
-**Estimated Effort:** ~50,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (ManualProfile, compiled patterns)
-**Parallelizable:** Partially — 3.1 is independent; 3.2-3.4 are sequential
+**Estimated Effort:** ~10,000 tokens (including testing/fixes)
+**Dependencies:** None
+**Parallelizable:** Yes — independent of Phases 1 and 2
 
 ### Goals
 
-- Generate namespaced chunk IDs in the format `{manual_id}::{level1}::{level2}::...`
-- Detect structural boundaries (chapters, sections, procedures) using profile regex patterns
-- Validate detected boundaries against known IDs from the profile
-- Build hierarchical manifest with parent-child relationships and chunk boundaries
+- Document the non-sequential rule ordering at the exact code location where it matters
+- Add a guard test that detects if someone reorders the rules incorrectly
 
 ### Work Items
 
-#### 3.1 Implement `generate_chunk_id()`
+#### 3.1 Add structured comment block to `assemble_chunks()`
 
-**Requirement Refs:** PRD 4.3.3 (Chunk ID format)
+**Requirement Refs:** Architectural Decision #1
 **Files Affected:**
-- `src/pipeline/structural_parser.py` (modify)
+- `src/pipeline/chunk_assembly.py` (modify — insert comment block before line 593)
 
 **Description:**
-Generate a chunk ID by joining the manual_id with hierarchy level IDs using `::` as delimiter. Format: `{manual_id}::{level1_id}::{level2_id}::...`. Empty hierarchy list returns just the manual_id.
+Insert a comment block directly above the first rule application (R1) in `assemble_chunks()` that explains the two-phase design and why R2 runs after R3-R5. Also update the function-level docstring to explicitly mention non-sequential ordering.
+
+Current docstring (line 566-568):
+```python
+def assemble_chunks(
+    pages: list[str], manifest: Manifest, profile: ManualProfile
+) -> list[Chunk]:
+    """Run the full chunk assembly pipeline.
+
+    Applies all rules (R1-R8) and builds final Chunk objects with metadata.
+    """
+```
+
+Target docstring:
+```python
+def assemble_chunks(
+    pages: list[str], manifest: Manifest, profile: ManualProfile
+) -> list[Chunk]:
+    """Run the full chunk assembly pipeline.
+
+    Applies rules R1-R8 in non-sequential order (R1,R3,R4,R5,R2,R6,R7,R8)
+    to ensure semantic integrity before size enforcement. See the inline
+    comment block above the rule applications for the full rationale.
+    """
+```
+
+Comment block to insert before line 593 (before `# R1: Primary unit`):
+```python
+        # ── Rule Application Order ──────────────────────────────────
+        # Intentionally non-sequential. Rules execute in two phases:
+        #
+        # Phase 1 — Semantic integrity (before any size enforcement):
+        #   R1: Primary unit — establish procedure boundaries
+        #   R3: Never split steps — protect step sequences as atomic
+        #   R4: Safety attachment — bind callouts to parent content
+        #   R5: Table integrity — keep tables with their headers
+        #
+        # Phase 2 — Size enforcement and cleanup:
+        #   R2: Size targets — split oversized chunks (AFTER integrity
+        #       rules so it respects step/safety/table boundaries)
+        #   R6: Merge small — combine undersized fragments
+        #   R7: Cross-reference merge — consolidate xref-only sections
+        #   R8: Figure continuity — keep figure refs with context
+        #
+        # WHY: If R2 ran before R3-R5, it would split at token
+        # boundaries before semantic units are identified, breaking
+        # step sequences, safety callouts, and tables across chunks.
+        # See LEARNINGS.md for discovery context.
+        # ────────────────────────────────────────────────────────────
+```
 
 **Tasks:**
-1. [ ] Join `manual_id` with `hierarchy_ids` using `::` separator
-2. [ ] Handle empty hierarchy list returning just `manual_id`
-3. [ ] Support alphanumeric IDs (e.g., `8A`, `B-4`, `III`, `42`)
+1. [ ] Update `assemble_chunks()` docstring to mention non-sequential ordering
+2. [ ] Insert the structured comment block above the R1 application (before current line 593)
+3. [ ] Verify the comment doesn't break any existing functionality (`pytest -v --tb=short`)
 
 **Acceptance Criteria:**
-- [ ] All 6 tests in `TestGenerateChunkId` pass
-- [ ] `generate_chunk_id("xj-1999", ["0", "SP", "JSP"])` returns `"xj-1999::0::SP::JSP"`
-- [ ] `generate_chunk_id("xj-1999", [])` returns `"xj-1999"`
+- [ ] Comment block is present directly above rule application code in `assemble_chunks()`
+- [ ] Comment explains both phases and the rationale for R2 placement
+- [ ] Function docstring mentions non-sequential rule application order
+- [ ] All 229 tests pass
 
 ---
 
-#### 3.2 Implement `detect_boundaries()`
+#### 3.2 Add ordering guard test
 
-**Requirement Refs:** PRD 4.3.1 (Header Detection)
+**Requirement Refs:** Architectural Decision #1
 **Files Affected:**
-- `src/pipeline/structural_parser.py` (modify)
+- `tests/test_chunk_assembly.py` (modify — add `TestRuleOrdering` class)
 
 **Description:**
-Scan cleaned text pages for structural boundaries using profile hierarchy patterns. For each hierarchy level, match lines against the level's `id_pattern` and `title_pattern`. Return a list of `Boundary` objects with level, level_name, extracted ID, title, page number, and line number.
+Write tests that validate the rule ordering produces correct results. The tests construct inputs where wrong ordering (R2 before R3/R4) would produce detectably different output. Two tests:
+
+1. **Safety callout integrity:** A WARNING block followed by a procedure, where the combined text is under 2000 tokens. With correct ordering (R4 before R2), the callout stays attached. With wrong ordering (R2 before R4), the callout could be orphaned.
+
+2. **Step sequence integrity:** A numbered step sequence under the size ceiling. With correct ordering (R3 before R2), all steps stay together. With wrong ordering (R2 before R3), steps could be split at a token boundary.
+
+Both tests use `assemble_chunks()` end-to-end (not individual rule functions) to validate the integrated behavior.
 
 **Tasks:**
-1. [ ] Iterate over pages with page index tracking
-2. [ ] For each line, test against each hierarchy level's compiled `id_pattern`
-3. [ ] Extract ID using regex capture groups
-4. [ ] Extract title using `title_pattern` if available
-5. [ ] Create `Boundary` object with level, level_name, id, title, page_number, line_number
-6. [ ] Return boundaries sorted by page and line number
-7. [ ] Handle empty pages and no-match pages returning `[]`
+1. [ ] Create `TestRuleOrdering` class in `test_chunk_assembly.py`
+2. [ ] Write `test_safety_callout_not_split_from_procedure` — constructs a WARNING + procedure text as pages + manifest, calls `assemble_chunks()`, asserts WARNING text and procedure text appear in the same chunk
+3. [ ] Write `test_step_sequence_preserved_before_size_split` — constructs a step sequence under the size ceiling as pages + manifest, calls `assemble_chunks()`, asserts all steps appear in one chunk
+4. [ ] Add fixtures or inline data for the test inputs (manifest entries, profile loading)
+5. [ ] Run full test suite to verify no conflicts
 
 **Acceptance Criteria:**
-- [ ] All 9 tests in `TestDetectBoundaries` pass
-- [ ] XJ boundaries: groups (0, 9), sections (SP), procedures (JSP) detected
-- [ ] CJ boundaries: sections (B), paragraphs (B-1) detected
-- [ ] TM9 boundaries: chapters (2), sections (III), paragraphs (42) detected
-- [ ] Empty input returns empty list
-
----
-
-#### 3.3 Implement `validate_boundaries()`
-
-**Requirement Refs:** PRD 4.3.1 (known_ids validation)
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify)
-
-**Description:**
-Cross-check detected boundary IDs against the profile's `known_ids` lists for each hierarchy level. Generate warning strings for unrecognized IDs. Levels without `known_ids` skip validation.
-
-**Tasks:**
-1. [ ] For each boundary, find its hierarchy level in the profile
-2. [ ] If that level has `known_ids`, check if the boundary's ID matches
-3. [ ] Generate warning string for unrecognized IDs
-4. [ ] Skip validation for levels without `known_ids`
-5. [ ] Return list of warning strings
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestValidateBoundaries` pass
-- [ ] Known IDs pass validation (empty warnings)
-- [ ] Unknown IDs generate descriptive warnings
-- [ ] Levels without known_ids silently pass
-
----
-
-#### 3.4 Implement `build_manifest()`
-
-**Requirement Refs:** PRD 4.3.3 (Manifest Output Format)
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify)
-
-**Description:**
-Construct a hierarchical `Manifest` from detected boundaries. Each boundary becomes a `ManifestEntry` with a generated chunk_id, hierarchy_path, parent_chunk_id, and children list. Establish parent-child relationships based on hierarchy levels.
-
-**Tasks:**
-1. [ ] Create `ManifestEntry` for each boundary using `generate_chunk_id()`
-2. [ ] Build hierarchy path from ancestor boundaries
-3. [ ] Set `parent_chunk_id` based on nearest ancestor at a higher level
-4. [ ] Populate `children` lists for parent entries
-5. [ ] Set `page_range` and `line_range` from boundary positions
-6. [ ] Set `manual_id` from profile
-7. [ ] Handle empty boundaries producing manifest with empty entries
-
-**Acceptance Criteria:**
-- [ ] All 6 tests in `TestBuildManifest` pass
-- [ ] Manifest `manual_id` matches profile
-- [ ] Parent-child relationships correctly established
-- [ ] Chunk IDs follow `{manual_id}::{hierarchy}` format
-- [ ] Empty boundaries produce empty manifest
+- [ ] Both tests pass with current (correct) rule ordering
+- [ ] Tests would fail if R2 were moved before R3/R4 (verify by mental model — actually reordering rules to prove it is optional but recommended)
+- [ ] All 229+ tests pass
+- [ ] Tests are in a clearly named `TestRuleOrdering` class with descriptive docstrings
 
 ---
 
 ### Phase 3 Testing Requirements
 
-- [x] `pytest tests/test_structural_parser.py` — all 28 tests pass
-- [x] Chunk IDs generated in correct format for all 3 manuals
-- [x] Boundaries detected from all 3 manual sample texts
-- [x] Manifest hierarchy correctly built
+- [ ] Guard tests validate correct ordering behavior with end-to-end `assemble_chunks()` calls
+- [ ] All existing 41 chunk assembly tests still pass
+- [ ] Full suite (229+ tests) passes
 
 ### Phase 3 Completion Checklist
 
-- [x] All work items complete
-- [x] All 28 structural parser tests passing
-- [x] All Phase 1-2 tests still passing (no regressions)
-- [x] Manifest correctly represents document hierarchy
-
----
-
-## Phase 4: Chunk Assembly Engine
-
-**Estimated Effort:** ~80,000 tokens (including testing/fixes)
-**Dependencies:** Phases 1, 3 (ManualProfile, Manifest, compiled patterns)
-**Parallelizable:** Yes — rules R1-R8 are largely independent; detection functions are independent
-
-### Goals
-
-- Count tokens using simple word-split approximation
-- Compose hierarchical headers for chunk context
-- Detect step sequences, safety callouts, and tables in text
-- Implement all 8 universal chunk boundary rules (R1-R8)
-- Tag chunks with vehicle/engine/drivetrain applicability
-- Orchestrate the full chunk assembly pipeline
-
-### Work Items
-
-#### 4.1 Implement `count_tokens()`
-
-**Requirement Refs:** PRD 4.4.1 R2 (Size targets)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Estimate token count using whitespace-split word count. Empty string returns 0.
-
-**Tasks:**
-1. [ ] Split text on whitespace, return count of non-empty segments
-2. [ ] Handle empty string returning 0
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestCountTokens` pass
-
----
-
-#### 4.2 Implement `compose_hierarchical_header()`
-
-**Requirement Refs:** PRD 4.4.4 (Chunk Text Composition)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Build a hierarchical header string: `{manual_title} | {level1} | {level2} | {level3}`.
-
-**Tasks:**
-1. [ ] Get `manual_title` from profile
-2. [ ] Join with hierarchy_path elements using ` | ` separator
-3. [ ] Return the composed header string
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestComposeHierarchicalHeader` pass
-- [ ] All 3 manuals produce correctly formatted headers
-
----
-
-#### 4.3 Implement `detect_step_sequences()`
-
-**Requirement Refs:** PRD 4.4.1 R3 (Never split steps)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Find contiguous numbered `(1), (2)` and lettered `a., b.` step sequences using profile step patterns. Return list of `(start_line, end_line)` tuples.
-
-**Tasks:**
-1. [ ] Split text into lines
-2. [ ] Match each line against step patterns
-3. [ ] Group consecutive matching lines into sequences
-4. [ ] Return list of `(start_line, end_line)` tuples
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestDetectStepSequences` pass
-- [ ] Both numbered and lettered patterns supported
-
----
-
-#### 4.4 Implement `detect_safety_callouts()`
-
-**Requirement Refs:** PRD 4.4.1 R4 (Safety attachment)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Find WARNING/CAUTION/NOTE callouts using profile safety patterns. Return list of dicts with `level`, `text`, and `line_range` keys.
-
-**Tasks:**
-1. [ ] Split text into lines, match against safety callout patterns
-2. [ ] Determine callout extent (single line or block)
-3. [ ] Return list of dicts with level, text, line_range
-
-**Acceptance Criteria:**
-- [ ] All 5 tests in `TestDetectSafetyCallouts` pass
-
----
-
-#### 4.5 Implement `detect_tables()`
-
-**Requirement Refs:** PRD 4.4.1 R5 (Table integrity)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Identify specification tables by formatting patterns (dot-leaders, columnar alignment). Return list of `(start_line, end_line)` tuples.
-
-**Tasks:**
-1. [ ] Analyze line patterns for table indicators
-2. [ ] Group consecutive table lines
-3. [ ] Return `(start_line, end_line)` tuples
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestDetectTables` pass
-
----
-
-#### 4.6 Implement `apply_rule_r1_primary_unit()`
-
-**Requirement Refs:** PRD 4.4.1 R1
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-One complete procedure/topic at the lowest meaningful hierarchy level stays as a single chunk.
-
-**Tasks:**
-1. [ ] Keep text as single chunk when it represents one procedure
-2. [ ] Split only at sub-boundaries if manifest entry indicates multiple children
-
-**Acceptance Criteria:**
-- [ ] Test in `TestRuleR1PrimaryUnit` passes
-
----
-
-#### 4.7 Implement `apply_rule_r2_size_targets()`
-
-**Requirement Refs:** PRD 4.4.1 R2
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Enforce size constraints: min 200 tokens, target 500-1500, max 2000 (hard ceiling). Split oversized chunks; leave others unchanged.
-
-**Tasks:**
-1. [ ] Check each chunk's token count
-2. [ ] Split chunks exceeding 2000 tokens at natural boundaries
-3. [ ] Leave normal/undersized chunks unchanged
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestRuleR2SizeTargets` pass
-
----
-
-#### 4.8 Implement `apply_rule_r3_never_split_steps()`
-
-**Requirement Refs:** PRD 4.4.1 R3
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Ensure step sequences are never split across chunks. Adjust split points to keep sequences together.
-
-**Tasks:**
-1. [ ] Detect step sequences using step patterns
-2. [ ] Ensure no chunk boundary falls within a step sequence
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestRuleR3NeverSplitSteps` pass
-
----
-
-#### 4.9 Implement `apply_rule_r4_safety_attachment()`
-
-**Requirement Refs:** PRD 4.4.1 R4
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Keep safety callouts (WARNING/CAUTION/NOTE) with their governed procedure.
-
-**Tasks:**
-1. [ ] Detect safety callouts in each chunk
-2. [ ] Merge isolated callouts with adjacent procedure chunks
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestRuleR4SafetyAttachment` pass
-
----
-
-#### 4.10 Implement `apply_rule_r5_table_integrity()`
-
-**Requirement Refs:** PRD 4.4.1 R5
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Specification tables are never split, even if they exceed the 2000-token ceiling.
-
-**Tasks:**
-1. [ ] Detect tables in chunks
-2. [ ] Prevent splits within table boundaries
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestRuleR5TableIntegrity` pass
-
----
-
-#### 4.11 Implement `apply_rule_r6_merge_small()`
-
-**Requirement Refs:** PRD 4.4.1 R6
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Merge chunks smaller than `min_tokens` (default 200) with their next sibling.
-
-**Tasks:**
-1. [ ] Check each chunk's token count against `min_tokens`
-2. [ ] Merge small chunks with next sibling
-3. [ ] Handle edge cases: single chunk, last chunk
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestRuleR6MergeSmall` pass
-
----
-
-#### 4.12 Implement `apply_rule_r7_crossref_merge()` and `apply_rule_r8_figure_continuity()`
-
-**Requirement Refs:** PRD 4.4.1 R7-R8
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-R7: Cross-reference-only sections merge into parent chunk. R8: Figure references stay with describing text.
-
-**Tasks:**
-1. [ ] R7: Detect chunks that are exclusively cross-reference text, merge into preceding chunk
-2. [ ] R8: Detect figure references, ensure they stay with describing paragraph
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestRuleR7CrossRefMerge` pass
-- [ ] Test in `TestRuleR8FigureContinuity` passes
-
----
-
-#### 4.13 Implement `tag_vehicle_applicability()`
-
-**Requirement Refs:** PRD 4.4.3 (Vehicle Applicability Tagging)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Scan chunk text for vehicle model names, engine aliases, and drivetrain keywords from the profile. Default to `["all"]` if no specific mentions found.
-
-**Tasks:**
-1. [ ] Match text against `profile.vehicles[].model` names and aliases
-2. [ ] Match against `profile.vehicles[].engines[].aliases`
-3. [ ] Match drivetrain keywords: "4WD", "2WD", "4x4"
-4. [ ] Default to `["all"]` for each category if no matches
-5. [ ] Return dict with `vehicle_models`, `engines`, `drivetrains` keys
-
-**Acceptance Criteria:**
-- [ ] All 7 tests in `TestTagVehicleApplicability` pass
-
----
-
-#### 4.14 Implement `assemble_chunks()`
-
-**Requirement Refs:** PRD 4.4 (Stage 3 full pipeline)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify)
-
-**Description:**
-Orchestrate the full chunk assembly pipeline: extract text per manifest entry, apply rules R1-R8 in sequence, compose hierarchical headers, tag vehicle applicability, build metadata dict, return list of `Chunk` objects.
-
-**Tasks:**
-1. [ ] Extract text for each manifest entry using page/line ranges
-2. [ ] Apply R1 through R8 in sequence
-3. [ ] Compose hierarchical header for each chunk
-4. [ ] Tag vehicle applicability
-5. [ ] Build metadata dict per PRD 4.4.5 schema
-6. [ ] Return list of `Chunk` objects
-
-**Acceptance Criteria:**
-- [ ] Full pipeline produces valid `Chunk` objects with populated metadata
-- [ ] Metadata includes: `hierarchy_path`, `level1_id`, `content_type`, `vehicle_models`, etc.
-
----
-
-### Phase 4 Testing Requirements
-
-- [x] `pytest tests/test_chunk_assembly.py` — all 41 tests pass
-- [x] All 8 rules tested independently and in pipeline
-- [x] Vehicle tagging works for all 3 manual types
-
-### Phase 4 Completion Checklist
-
-- [x] All work items complete
-- [x] All 41 chunk assembly tests passing
-- [x] All Phase 1-3 tests still passing (no regressions)
-
----
-
-## Phase 5: Embedding and Retrieval
-
-**Estimated Effort:** ~50,000 tokens (including testing/fixes)
-**Dependencies:** Phases 1, 4 (ManualProfile, Chunk objects)
-**Parallelizable:** Yes — embedding (5.1-5.3) and retrieval (5.4-5.6) are independent work streams
-
-### Goals
-
-- Compose embedding input from hierarchical header plus first 150 body words
-- Build SQLite secondary index for metadata-based lookups
-- Analyze natural language queries to extract vehicle/system/type scope
-- Implement result enrichment (parent, sibling, cross-reference) and reranking
-
-### Work Items
-
-#### 5.1 Implement `get_first_n_words()` and `compose_embedding_input()`
-
-**Requirement Refs:** PRD 4.5.1 (Embedding Input)
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify)
-
-**Description:**
-`get_first_n_words()`: Extract the first N words (default 150) from text. `compose_embedding_input()`: Combine hierarchical header with first 150 body words into an `EmbeddingInput` object.
-
-**Tasks:**
-1. [ ] `get_first_n_words()`: Split text on whitespace, return first N words joined
-2. [ ] Handle fewer than N words (return all available) and empty text
-3. [ ] `compose_embedding_input()`: Extract header from chunk, get first 150 body words
-4. [ ] Combine into `EmbeddingInput(chunk_id, text)`
-
-**Acceptance Criteria:**
-- [ ] All 5 tests in `TestGetFirstNWords` pass
-- [ ] All 4 tests in `TestComposeEmbeddingInput` pass
-
----
-
-#### 5.2 Implement `generate_embedding()`, `create_qdrant_collection()`, `index_chunks()`
-
-**Requirement Refs:** PRD 4.5.2-4.5.3 (Embedding Model, Vector Store)
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify)
-
-**Description:**
-`generate_embedding()`: Call Ollama API with nomic-embed-text model. `create_qdrant_collection()`: Create a Qdrant collection. `index_chunks()`: Index chunks into Qdrant with metadata.
-
-**Tasks:**
-1. [ ] `generate_embedding()`: POST to Ollama `/api/embeddings` endpoint, return vector
-2. [ ] `create_qdrant_collection()`: Use qdrant_client to create collection
-3. [ ] `index_chunks()`: Compose embeddings, upsert to Qdrant with metadata payload
-
-**Acceptance Criteria:**
-- [ ] Functions implement correct API calls with proper data marshaling
-- [ ] Metadata payload includes all filterable fields from PRD 4.5.3
-
-**Notes:**
-- Tests likely mock external service calls (Ollama, Qdrant). Focus on correct API signatures.
-
----
-
-#### 5.3 Implement `build_sqlite_index()`
-
-**Requirement Refs:** PRD 4.5.4 (Secondary Metadata Index)
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify)
-
-**Description:**
-Build SQLite database with lookup tables: procedure_name, vehicle_model, figure_ref, cross_ref_target — each mapping to chunk_ids.
-
-**Tasks:**
-1. [ ] Create SQLite database at specified path
-2. [ ] Create tables: `procedure_lookup`, `vehicle_model_lookup`, `figure_lookup`, `cross_ref_lookup`
-3. [ ] Populate from chunk metadata
-4. [ ] Create indexes for fast lookups
-
-**Acceptance Criteria:**
-- [ ] All 5 tests in `TestBuildSQLiteIndex` pass
-- [ ] Lookups return correct chunk IDs
-
----
-
-#### 5.4 Implement `analyze_query()`
-
-**Requirement Refs:** PRD 5.1 (Query Understanding)
-**Files Affected:**
-- `src/pipeline/retrieval.py` (modify)
-
-**Description:**
-Parse a natural language query to extract structured scope: vehicle, engine, drivetrain, system, and query type (procedure/specification/diagnostic).
-
-**Tasks:**
-1. [ ] Extract vehicle scope by matching known vehicle names/aliases
-2. [ ] Extract engine scope by matching engine codes/aliases
-3. [ ] Extract drivetrain scope by matching drivetrain keywords
-4. [ ] Extract system scope by matching system/group keywords
-5. [ ] Classify query type based on intent keywords
-6. [ ] Return `QueryAnalysis` dataclass
-
-**Acceptance Criteria:**
-- [ ] All 15 tests in `TestAnalyzeQuery` pass
-- [ ] Vehicle, engine, drivetrain, system extraction works correctly
-- [ ] Query type classification accurate
-
----
-
-#### 5.5 Implement `enrich_with_parent()`, `enrich_with_siblings()`, `resolve_cross_references()`
-
-**Requirement Refs:** PRD 5.2 (Retrieval Flow steps 2-4)
-**Files Affected:**
-- `src/pipeline/retrieval.py` (modify)
-
-**Description:**
-Enrich retrieval results with contextual chunks: parent for section overview, siblings for adjacent procedures, cross-references for related content.
-
-**Tasks:**
-1. [ ] `enrich_with_parent()`: Look up parent chunk, add with `source="parent"`
-2. [ ] `enrich_with_siblings()`: Look up sibling chunks, add with `source="sibling"`
-3. [ ] `resolve_cross_references()`: Resolve cross-ref targets, add with `source="cross_ref"`
-4. [ ] Handle missing parents/siblings/refs gracefully
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestEnrichWithParent` pass
-- [ ] Test in `TestEnrichWithSiblings` passes
-- [ ] Test in `TestResolveCrossReferences` passes
-
----
-
-#### 5.6 Implement `rerank()` and `retrieve()`
-
-**Requirement Refs:** PRD 5.2 (Retrieval Flow step 5)
-**Files Affected:**
-- `src/pipeline/retrieval.py` (modify)
-
-**Description:**
-`rerank()`: Sort results by score descending, return top N. `retrieve()`: Full retrieval pipeline.
-
-**Tasks:**
-1. [ ] `rerank()`: Sort by `score` descending, return first `top_n` results
-2. [ ] Handle fewer results than `top_n`
-3. [ ] `retrieve()`: Compose full retrieval flow (embed, search, enrich, rerank)
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestRerank` pass
-
----
-
-### Phase 5 Testing Requirements
-
-- [x] `pytest tests/test_embeddings.py` — all 12 tests pass
-- [x] `pytest tests/test_retrieval.py` — all 19 tests pass
-
-### Phase 5 Completion Checklist
-
-- [x] All work items complete
-- [x] All 31 embedding + retrieval tests passing
-- [x] All Phase 1-4 tests still passing (no regressions)
-
----
-
-## Phase 6: QA Validation and CLI
-
-**Estimated Effort:** ~35,000 tokens (including testing/fixes)
-**Dependencies:** All previous phases
-**Parallelizable:** Yes — QA checks (6.1-6.7) are fully independent; CLI (6.9) is independent of QA internals
-
-### Goals
-
-- Implement the 7-check validation suite for chunk quality assurance
-- Build the CLI argument parser with 4 subcommands
-- Wire up CLI subcommands to pipeline functions
-
-### Work Items
-
-#### 6.1 Implement `check_orphaned_steps()`
-
-**Requirement Refs:** PRD 6.1 (Check 1)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Detect chunks that start mid-sequence (e.g., `(3)` without preceding `(1)(2)`). A chunk starting with `(1)` or `a.` is valid.
-
-**Tasks:**
-1. [ ] Check first step in each chunk against step patterns
-2. [ ] Flag chunks starting mid-sequence
-3. [ ] Return list of `ValidationIssue` with `check="orphaned_steps"`
-
-**Acceptance Criteria:**
-- [ ] All 5 tests in `TestCheckOrphanedSteps` pass
-
----
-
-#### 6.2 Implement `check_split_safety_callouts()`
-
-**Requirement Refs:** PRD 6.1 (Check 2)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Detect safety callouts at chunk boundaries without their governed procedure.
-
-**Tasks:**
-1. [ ] Check if chunk starts with a safety callout without following procedure text
-2. [ ] Return `ValidationIssue` list
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestCheckSplitSafetyCallouts` pass
-
----
-
-#### 6.3 Implement `check_size_outliers()`
-
-**Requirement Refs:** PRD 6.1 (Check 3)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Flag chunks below `min_tokens` (default 100) or above `max_tokens` (default 3000).
-
-**Tasks:**
-1. [ ] Count tokens for each chunk
-2. [ ] Flag chunks outside range with severity "warning"
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestCheckSizeOutliers` pass
-
----
-
-#### 6.4 Implement `check_metadata_completeness()`
-
-**Requirement Refs:** PRD 6.1 (Check 4)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Verify every chunk has required metadata fields: `manual_id`, `level1_id`, `content_type`.
-
-**Tasks:**
-1. [ ] Check each chunk's metadata dict for required keys
-2. [ ] Flag missing fields with severity "error"
-
-**Acceptance Criteria:**
-- [ ] All 4 tests in `TestCheckMetadataCompleteness` pass
-
----
-
-#### 6.5 Implement `check_duplicate_content()`
-
-**Requirement Refs:** PRD 6.1 (Check 5)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Detect near-duplicate chunks using text similarity above threshold (default 0.95).
-
-**Tasks:**
-1. [ ] Compare chunk texts pairwise
-2. [ ] Calculate similarity (token overlap or ratio)
-3. [ ] Flag pairs exceeding threshold
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestCheckDuplicateContent` pass
-
----
-
-#### 6.6 Implement `check_cross_ref_validity()`
-
-**Requirement Refs:** PRD 6.1 (Check 6)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Verify that cross-reference targets resolve to existing chunk IDs.
-
-**Tasks:**
-1. [ ] Collect all chunk IDs into a set
-2. [ ] Flag references to non-existent chunk IDs
-
-**Acceptance Criteria:**
-- [ ] All 3 tests in `TestCheckCrossRefValidity` pass
-
----
-
-#### 6.7 Implement `check_profile_validation()`
-
-**Requirement Refs:** PRD 6.1 (Check 7)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Verify that level1 IDs in chunks match the profile's `known_ids` list.
-
-**Tasks:**
-1. [ ] Extract `level1_id` from each chunk's metadata
-2. [ ] Compare against `profile.hierarchy[0].known_ids`
-3. [ ] Flag unrecognized IDs
-
-**Acceptance Criteria:**
-- [ ] All 2 tests in `TestCheckProfileValidation` pass
-
----
-
-#### 6.8 Implement `run_validation_suite()`
-
-**Requirement Refs:** PRD 6.1 (Full validation suite)
-**Files Affected:**
-- `src/pipeline/qa.py` (modify)
-
-**Description:**
-Run all 7 checks and aggregate into a `ValidationReport`.
-
-**Tasks:**
-1. [ ] Call all 7 check functions
-2. [ ] Aggregate issues, count errors and warnings
-3. [ ] Set `passed = (error_count == 0)`
-4. [ ] Return `ValidationReport`
-
-**Acceptance Criteria:**
-- [ ] All 7 tests in `TestRunValidationSuite` pass
-- [ ] `passed` is `True` only when `error_count == 0`
-
----
-
-#### 6.9 Implement CLI (`build_parser()` and subcommands)
-
-**Requirement Refs:** PRD 7.1 (CLI Interface)
-**Files Affected:**
-- `src/pipeline/cli.py` (modify)
-
-**Description:**
-Build `ArgumentParser` with 4 subcommands: `process`, `bootstrap-profile`, `validate`, `qa`. Implement `main()` entry point.
-
-**Tasks:**
-1. [ ] `build_parser()`: Create parser with subcommands
-   - `process --profile <path> --pdf <path>`
-   - `bootstrap-profile --pdf <path> --output <path>`
-   - `validate --profile <path> --pdf <path>`
-   - `qa --manual-id <id> --test-set <path>`
-2. [ ] `cmd_process()`: Wire up full pipeline
-3. [ ] `cmd_bootstrap_profile()`: Stub for LLM-based profile generation
-4. [ ] `cmd_validate()`: Wire up to validation
-5. [ ] `cmd_qa()`: Wire up to QA suite
-6. [ ] `main()`: Parse args, dispatch to handler, return exit code
-7. [ ] Handle errors gracefully (nonexistent files produce non-zero exit code)
-
-**Acceptance Criteria:**
-- [ ] All 8 tests in `TestBuildParser` pass
-- [ ] All 3 tests in `TestMain` pass
-- [ ] Subcommands accept required arguments
-- [ ] Missing subcommand raises SystemExit
-
----
-
-### Phase 6 Testing Requirements
-
-- [x] `pytest tests/test_qa.py` — all 31 tests pass
-- [x] `pytest tests/test_cli.py` — all 11 tests pass
-
-### Phase 6 Completion Checklist
-
-- [x] All work items complete
-- [x] All 42 QA + CLI tests passing
-- [x] Full test suite passes: `pytest` — all 229 tests green
-- [x] No regressions across any phase
+- [ ] All work items complete
+- [ ] All tests passing
+- [ ] Comment block is clear, accurate, and positioned at the decision point
+- [ ] Function docstring updated
+- [ ] No regressions introduced
 
 ---
 
 ## Parallel Work Opportunities
 
+All three phases are fully independent and can be executed concurrently.
+
 | Work Item | Can Run With | Notes |
 |-----------|--------------|-------|
-| Phase 2 (OCR) | Phase 3 (Structural) | Both depend only on Phase 1; no inter-dependency |
-| 4.1 count_tokens | 4.2 compose_header | Independent utility functions |
-| 4.3 detect_steps | 4.4 detect_safety | Independent detection functions |
-| 4.6-4.12 Rules R1-R8 | Each other | Rules are independent transforms |
-| 5.1-5.3 Embedding | 5.4-5.6 Retrieval | Different modules, linked only through data types |
-| 6.1-6.7 QA checks | Each other | All 7 checks are fully independent |
-| 6.1-6.8 QA suite | 6.9 CLI | QA logic vs argument parsing are independent |
+| Phase 1 (Schema) | Phase 2, Phase 3 | Touches `profile.py` and `ocr_cleanup.py` only — no overlap with `chunk_assembly.py` rule/token code |
+| Phase 2 (Tokens) | Phase 1, Phase 3 | Touches `chunk_assembly.py` lines 22-29 only |
+| Phase 3 (Rules) | Phase 1, Phase 2 | Touches `chunk_assembly.py` lines 566-625 and `test_chunk_assembly.py` only |
 
 ---
 
@@ -1153,25 +485,26 @@ Build `ArgumentParser` with 4 subcommands: `process`, `bootstrap-profile`, `vali
 
 | Risk | Likelihood | Impact | Mitigation Strategy |
 |------|------------|--------|---------------------|
-| Profile YAML structure does not match test expectations | Medium | High | Read test fixtures carefully; match YAML key paths exactly to dataclass fields |
-| OCR garbage detection threshold logic unclear | Low | Medium | Study test cases for exact threshold comparison behavior |
-| Step pattern detection edge cases (military numbering vs hierarchy) | Medium | Medium | Check hierarchy patterns in level order, disambiguate by context |
-| Chunk rule interaction order matters | Medium | High | Apply rules in strict R1 to R8 order; test each independently first |
-| SQLite index schema not fully specified | Low | Medium | Derive schema from test assertions in TestBuildSQLiteIndex |
-| External service mocking (Ollama, Qdrant) in tests | Medium | Medium | Implement correct API signatures so mocks work |
-| Vehicle tagging ambiguity for multi-vehicle manuals | High | Medium | Default to ["all"] when no specific model mentioned |
+| Typed dicts break tests that access fields by dict key | Medium | Medium | Search all test and source files for dict-style access on `ocr_cleanup`, `content_types`, `variants` before changing types; update in same commit |
+| `schema_version` check breaks `invalid_profile.yaml` tests | Low | Low | Add `schema_version: "1.0"` to invalid profile; it tests other invalid fields (empty title, empty vehicles, bad format), not version |
+| JSON Schema diverges from Python dataclass over time | Medium | Low | Add a comment in `profile.py` pointing to the schema file; schema is documentation, not runtime enforcement |
+| `TOKEN_ESTIMATE_FACTOR` multiply changes existing test expectations | Very Low | Low | Factor is 1.0, and `int(n * 1.0)` == `n` for all integers; verified by existing tests |
+| Guard tests are fragile or over-fitted to current implementation | Medium | Low | Use `assemble_chunks()` end-to-end rather than inspecting function internals; test observable behavior (which chunks contain which text) |
+| Expanded validation rejects previously-valid profiles | Low | High | Run all 229 existing tests after every validation change; existing valid profiles must still pass |
 
 ---
 
 ## Success Metrics
 
-- [x] All 6 phases completed
-- [x] All 229 tests passing (`pytest` exits with code 0)
-- [x] All acceptance criteria met for every work item
-- [x] No `NotImplementedError` remains in any source module
-- [x] Pipeline processes all 3 target manuals (XJ, CJ, TM9) through full chain
-- [x] Chunk validation suite reports no errors on well-formed chunks
-- [x] CLI accepts and dispatches all 4 subcommands correctly
+- [ ] All three architectural decisions documented at source-code level
+- [ ] Profile schema formally defined in JSON Schema (`schema/manual_profile_v1.schema.json`)
+- [ ] `dict[str, Any]` fields replaced with typed dataclasses on `ManualProfile`
+- [ ] `validate_profile()` catches regex errors, structural issues, malformed OCR config
+- [ ] Guard tests prevent silent rule reordering in `assemble_chunks()`
+- [ ] `count_tokens()` tradeoff documented with tunable scaling constant
+- [ ] All existing 229 tests pass
+- [ ] No new runtime dependencies added
+- [ ] `CLAUDE.md` Key Data Types section updated with new dataclasses
 
 ---
 
@@ -1179,50 +512,16 @@ Build `ArgumentParser` with 4 subcommands: `process`, `bootstrap-profile`, `vali
 
 | Requirement | Source | Phase | Work Item |
 |-------------|--------|-------|-----------|
-| YAML profile loading with nested dataclasses | PRD 3.1, 3.2-3.4 | 1 | 1.1 |
-| Profile validation | PRD 3.1 | 1 | 1.2 |
-| Pattern pre-compilation | PRD 4.3.1 | 1 | 1.3 |
-| OCR known substitutions | PRD 4.2.2 step 1 | 2 | 2.1 |
-| Header/footer stripping | PRD 4.2.2 step 2 | 2 | 2.2 |
-| Garbage line detection | PRD 4.2.2 step 3 | 2 | 2.3 |
-| Unicode normalization | PRD 4.2.2 step 4 | 2 | 2.4 |
-| Full page cleanup pipeline | PRD 4.2 | 2 | 2.5 |
-| OCR quality assessment | PRD 4.2.3 | 2 | 2.6 |
-| Chunk ID generation | PRD 4.3.3 | 3 | 3.1 |
-| Boundary detection | PRD 4.3.1 | 3 | 3.2 |
-| Boundary validation against known_ids | PRD 4.3.1 | 3 | 3.3 |
-| Hierarchical manifest building | PRD 4.3.3 | 3 | 3.4 |
-| Token counting | PRD 4.4.1 R2 | 4 | 4.1 |
-| Hierarchical header composition | PRD 4.4.4 | 4 | 4.2 |
-| Step sequence detection | PRD 4.4.1 R3 | 4 | 4.3 |
-| Safety callout detection | PRD 4.4.1 R4 | 4 | 4.4 |
-| Table detection | PRD 4.4.1 R5 | 4 | 4.5 |
-| Rule R1: Primary unit | PRD 4.4.1 | 4 | 4.6 |
-| Rule R2: Size targets | PRD 4.4.1 | 4 | 4.7 |
-| Rule R3: Never split steps | PRD 4.4.1 | 4 | 4.8 |
-| Rule R4: Safety attachment | PRD 4.4.1 | 4 | 4.9 |
-| Rule R5: Table integrity | PRD 4.4.1 | 4 | 4.10 |
-| Rule R6: Merge small chunks | PRD 4.4.1 | 4 | 4.11 |
-| Rules R7-R8: Cross-ref merge, Figure continuity | PRD 4.4.1 | 4 | 4.12 |
-| Vehicle applicability tagging | PRD 4.4.3 | 4 | 4.13 |
-| Full chunk assembly pipeline | PRD 4.4 | 4 | 4.14 |
-| Embedding input composition | PRD 4.5.1 | 5 | 5.1 |
-| Qdrant vector indexing | PRD 4.5.3 | 5 | 5.2 |
-| SQLite secondary index | PRD 4.5.4 | 5 | 5.3 |
-| Query analysis / understanding | PRD 5.1 | 5 | 5.4 |
-| Parent/sibling/cross-ref enrichment | PRD 5.2 | 5 | 5.5 |
-| Reranking and full retrieval | PRD 5.2 | 5 | 5.6 |
-| Check: Orphaned steps | PRD 6.1 | 6 | 6.1 |
-| Check: Split safety callouts | PRD 6.1 | 6 | 6.2 |
-| Check: Size outliers | PRD 6.1 | 6 | 6.3 |
-| Check: Metadata completeness | PRD 6.1 | 6 | 6.4 |
-| Check: Duplicate content | PRD 6.1 | 6 | 6.5 |
-| Check: Cross-ref validity | PRD 6.1 | 6 | 6.6 |
-| Check: Profile validation | PRD 6.1 | 6 | 6.7 |
-| Full validation suite | PRD 6.1 | 6 | 6.8 |
-| CLI with 4 subcommands | PRD 7.1 | 6 | 6.9 |
+| Profile schema version marker | Architectural Decision #3 | 1 | 1.1 |
+| Typed dataclasses for dict fields | Architectural Decision #3 | 1 | 1.2 |
+| Expanded profile validation | Architectural Decision #3 | 1 | 1.3 |
+| JSON Schema definition | Architectural Decision #3 | 1 | 1.4 |
+| Token counting tradeoff documentation | Architectural Decision #2 | 2 | 2.1 |
+| Token scaling factor constant | Architectural Decision #2 | 2 | 2.1 |
+| Rule ordering documentation in source | Architectural Decision #1 | 3 | 3.1 |
+| Rule ordering guard test | Architectural Decision #1 | 3 | 3.2 |
 
 ---
 
 *Implementation plan generated by Claude on 2026-02-15*
-*Source: /create-plan command*
+*Source: Architectural decision analysis conversation + /create-plan command*

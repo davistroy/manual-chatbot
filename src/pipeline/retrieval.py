@@ -293,18 +293,66 @@ def enrich_with_siblings(results: list[RetrievalResult]) -> list[RetrievalResult
     return enriched
 
 
-def resolve_cross_references(results: list[RetrievalResult]) -> list[RetrievalResult]:
-    """Resolve cross-references found in retrieved chunks."""
+def resolve_cross_references(
+    results: list[RetrievalResult],
+    sqlite_db_path: str | None = None,
+) -> list[RetrievalResult]:
+    """Resolve cross-references found in retrieved chunks.
+
+    When sqlite_db_path is provided, looks up cross-reference targets in the
+    SQLite secondary index and adds them as additional results.
+    """
+    import sqlite3
+
     enriched = list(results)
 
-    for result in results:
-        cross_refs = result.metadata.get("cross_references", [])
-        if not cross_refs:
-            continue
+    if sqlite_db_path is None:
+        return enriched
 
-        # In a full implementation, we'd look up the cross-reference targets
-        # in the SQLite index and add them as results. For now, we keep
-        # the results as-is since cross-refs need external resolution.
+    existing_ids = {r.chunk_id for r in enriched}
+
+    try:
+        conn = sqlite3.connect(sqlite_db_path)
+        cursor = conn.cursor()
+
+        for result in results:
+            cross_refs = result.metadata.get("cross_references", [])
+            if not cross_refs:
+                continue
+
+            for ref in cross_refs:
+                # Look up the cross-reference target in the cross_ref_lookup table
+                cursor.execute(
+                    "SELECT chunk_id, manual_id FROM cross_ref_lookup WHERE cross_reference = ?",
+                    (ref,),
+                )
+                rows = cursor.fetchall()
+
+                for chunk_id, manual_id in rows:
+                    if chunk_id in existing_ids:
+                        continue
+
+                    # Fetch the chunk text from procedure_lookup if available
+                    cursor.execute(
+                        "SELECT procedure_name FROM procedure_lookup WHERE chunk_id = ?",
+                        (chunk_id,),
+                    )
+                    proc_row = cursor.fetchone()
+                    proc_name = proc_row[0] if proc_row else ""
+
+                    xref_result = RetrievalResult(
+                        chunk_id=chunk_id,
+                        text="",  # Would be populated from Qdrant in production
+                        metadata={"manual_id": manual_id, "procedure_name": proc_name},
+                        score=result.score * 0.5,
+                        source="cross_ref",
+                    )
+                    enriched.append(xref_result)
+                    existing_ids.add(chunk_id)
+
+        conn.close()
+    except sqlite3.Error:
+        pass  # Graceful degradation — return what we have
 
     return enriched
 
@@ -321,8 +369,19 @@ def retrieve(
     query: QueryAnalysis,
     top_k: int = 10,
     collection_name: str = "service_manuals",
+    client: Any = None,
+    sqlite_db_path: str | None = None,
 ) -> RetrievalResponse:
     """Execute the full retrieval pipeline.
+
+    Args:
+        query: Analyzed query with extracted filters.
+        top_k: Maximum number of results to return.
+        collection_name: Qdrant collection name.
+        client: Optional qdrant_client.QdrantClient instance. When None,
+                returns empty results (backward-compatible default).
+        sqlite_db_path: Optional path to SQLite secondary index for
+                cross-reference resolution.
 
     Steps:
     1. Embed query -> ANN search with metadata filters
@@ -336,9 +395,41 @@ def retrieve(
     # Step 1: Generate query embedding and search
     query_vector = generate_embedding(query.original_query)
 
-    # In production, we'd search Qdrant here. For now, return empty
-    # since the actual search requires a running Qdrant instance.
     primary_results: list[RetrievalResult] = []
+
+    if client is not None:
+        from qdrant_client import models
+
+        # Build metadata filter from query analysis
+        query_filter = None
+        if query.manual_id_filter:
+            query_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="manual_id",
+                        match=models.MatchValue(value=query.manual_id_filter),
+                    )
+                ]
+            )
+
+        scored_points = client.search(
+            collection_name=collection_name,
+            query_vector=query_vector,
+            query_filter=query_filter,
+            limit=top_k,
+        )
+
+        for point in scored_points:
+            payload = point.payload or {}
+            primary_results.append(
+                RetrievalResult(
+                    chunk_id=payload.get("chunk_id", str(point.id)),
+                    text=payload.get("text", ""),
+                    metadata={k: v for k, v in payload.items() if k not in ("chunk_id", "text")},
+                    score=point.score,
+                    source="primary",
+                )
+            )
 
     # Step 2: Parent-chunk enrichment
     enriched = enrich_with_parent(primary_results)
@@ -347,7 +438,7 @@ def retrieve(
     enriched = enrich_with_siblings(enriched)
 
     # Step 4: Cross-reference resolution
-    enriched = resolve_cross_references(enriched)
+    enriched = resolve_cross_references(enriched, sqlite_db_path=sqlite_db_path)
 
     # Step 5: Re-rank and return top results
     final_results = rerank(enriched, top_n=min(top_k, 5))

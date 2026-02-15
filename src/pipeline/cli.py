@@ -84,7 +84,44 @@ def cmd_process(args: argparse.Namespace) -> int:
         print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
         return 1
 
-    # TODO: Implement full pipeline processing
+    # Imports inside function to avoid circular imports
+    from .profile import load_profile, validate_profile
+    from . import extract_pages
+    from .ocr_cleanup import clean_page
+    from .structural_parser import detect_boundaries, build_manifest
+    from .chunk_assembly import assemble_chunks
+
+    # 1. Load and validate profile
+    profile = load_profile(profile_path)
+    errors = validate_profile(profile)
+    if errors:
+        for err in errors:
+            print(f"  Profile error: {err}", file=sys.stderr)
+        return 1
+    print(f"Profile loaded: {profile.manual_id}")
+
+    # 2. Extract pages from PDF
+    pages = extract_pages(pdf_path)
+    print(f"Extracted {len(pages)} pages from PDF")
+
+    # 3. OCR cleanup per page
+    cleaned = [clean_page(p, i, profile) for i, p in enumerate(pages)]
+    cleaned_texts = [c.cleaned_text for c in cleaned]
+    print(f"Cleaned {len(cleaned)} pages")
+
+    # 4. Detect boundaries and build manifest
+    boundaries = detect_boundaries(cleaned_texts, profile)
+    manifest = build_manifest(boundaries, profile)
+    print(f"Detected {len(boundaries)} boundaries, {len(manifest.entries)} manifest entries")
+
+    # 5. Assemble chunks
+    chunks = assemble_chunks(cleaned_texts, manifest, profile)
+    print(f"Assembled {len(chunks)} chunks")
+
+    # 6. Indexing requires running Qdrant + Ollama — skip with message
+    print("\nSkipping embedding/indexing (requires running Qdrant and Ollama).")
+    print("To index, start Qdrant and Ollama, then use the Python API directly.")
+
     return 0
 
 
@@ -119,8 +156,61 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
         return 1
 
-    # TODO: Implement validation logic
-    return 0
+    # Imports inside function to avoid circular imports
+    from .profile import load_profile, validate_profile
+    from . import extract_pages
+    from .ocr_cleanup import clean_page
+    from .structural_parser import detect_boundaries, build_manifest, validate_boundaries
+    from .chunk_assembly import assemble_chunks
+    from .qa import run_validation_suite
+
+    # 1. Load and validate profile
+    profile = load_profile(profile_path)
+    errors = validate_profile(profile)
+    if errors:
+        for err in errors:
+            print(f"  Profile error: {err}", file=sys.stderr)
+        return 1
+    print(f"Profile loaded: {profile.manual_id}")
+
+    # 2. Extract pages from PDF
+    pages = extract_pages(pdf_path)
+    print(f"Extracted {len(pages)} pages from PDF")
+
+    # 3. OCR cleanup per page
+    cleaned = [clean_page(p, i, profile) for i, p in enumerate(pages)]
+    cleaned_texts = [c.cleaned_text for c in cleaned]
+    print(f"Cleaned {len(cleaned)} pages")
+
+    # 4. Detect boundaries and build manifest
+    boundaries = detect_boundaries(cleaned_texts, profile)
+    manifest = build_manifest(boundaries, profile)
+    print(f"Detected {len(boundaries)} boundaries, {len(manifest.entries)} manifest entries")
+
+    # 5. Validate boundaries against profile known_ids
+    boundary_warnings = validate_boundaries(boundaries, profile)
+    if boundary_warnings:
+        print(f"\nBoundary warnings ({len(boundary_warnings)}):")
+        for w in boundary_warnings:
+            print(f"  {w}")
+
+    # 6. Assemble chunks
+    chunks = assemble_chunks(cleaned_texts, manifest, profile)
+    print(f"Assembled {len(chunks)} chunks")
+
+    # 7. Run QA validation suite
+    report = run_validation_suite(chunks, profile)
+    print(f"\nValidation: {len(report.checks_run)} checks run on {report.total_chunks} chunks")
+    print(f"  Errors:   {report.error_count}")
+    print(f"  Warnings: {report.warning_count}")
+    print(f"  Passed:   {report.passed}")
+
+    if report.issues:
+        print("\nIssues:")
+        for issue in report.issues:
+            print(f"  [{issue.severity}] {issue.check}: {issue.message} (chunk: {issue.chunk_id})")
+
+    return 0 if report.passed else 1
 
 
 def cmd_qa(args: argparse.Namespace) -> int:
@@ -128,8 +218,9 @@ def cmd_qa(args: argparse.Namespace) -> int:
 
     Returns exit code (0 = success).
     """
-    # TODO: Implement QA check logic
-    return 0
+    print("Error: QA checks require a running Qdrant instance and indexed data.", file=sys.stderr)
+    print("Index a manual first with 'pipeline process', then run QA.", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

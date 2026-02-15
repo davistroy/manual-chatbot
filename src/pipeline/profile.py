@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+CURRENT_SCHEMA_VERSION = "1.0"
+
 
 @dataclass
 class HierarchyLevel:
@@ -54,8 +56,43 @@ class Vehicle:
 
 
 @dataclass
+class ContentTypeConfig:
+    """Content type metadata — sub-fields remain dicts because structure
+    varies fundamentally across manual types (mileage-bands vs echelon-based
+    vs interval-table)."""
+    maintenance_schedule: dict[str, Any] = field(default_factory=dict)
+    wiring_diagrams: dict[str, Any] = field(default_factory=dict)
+    specification_tables: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GarbageDetectionConfig:
+    """Garbage line detection parameters."""
+    enabled: bool = False
+    threshold: float = 0.5
+
+
+@dataclass
+class OcrCleanupConfig:
+    """OCR cleanup configuration from manual profile."""
+    quality_estimate: str = ""
+    known_substitutions: list[dict[str, str]] = field(default_factory=list)
+    header_footer_patterns: list[str] = field(default_factory=list)
+    garbage_detection: GarbageDetectionConfig = field(default_factory=GarbageDetectionConfig)
+
+
+@dataclass
+class VariantConfig:
+    """Market variant configuration."""
+    has_market_variants: bool = False
+    variant_indicator: str = "none"
+    markets: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ManualProfile:
     """Complete manual profile loaded from YAML."""
+    schema_version: str
     manual_id: str
     manual_title: str
     source_url: str
@@ -69,9 +106,38 @@ class ManualProfile:
     figure_reference_scope: str
     cross_reference_patterns: list[str]
     safety_callouts: list[SafetyCallout]
-    content_types: dict[str, Any]
-    ocr_cleanup: dict[str, Any]
-    variants: dict[str, Any]
+    content_types: ContentTypeConfig
+    ocr_cleanup: OcrCleanupConfig
+    variants: VariantConfig
+
+
+def _parse_content_types(data: dict[str, Any]) -> ContentTypeConfig:
+    return ContentTypeConfig(
+        maintenance_schedule=data.get("maintenance_schedule", {}),
+        wiring_diagrams=data.get("wiring_diagrams", {}),
+        specification_tables=data.get("specification_tables", {}),
+    )
+
+
+def _parse_ocr_cleanup(data: dict[str, Any]) -> OcrCleanupConfig:
+    gd = data.get("garbage_detection", {})
+    return OcrCleanupConfig(
+        quality_estimate=data.get("quality_estimate", ""),
+        known_substitutions=data.get("known_substitutions", []),
+        header_footer_patterns=data.get("header_footer_patterns", []),
+        garbage_detection=GarbageDetectionConfig(
+            enabled=gd.get("enabled", False),
+            threshold=gd.get("threshold", 0.5),
+        ),
+    )
+
+
+def _parse_variants(data: dict[str, Any]) -> VariantConfig:
+    return VariantConfig(
+        has_market_variants=data.get("has_market_variants", False),
+        variant_indicator=data.get("variant_indicator", "none"),
+        markets=data.get("markets", []),
+    )
 
 
 def load_profile(path: str | Path) -> ManualProfile:
@@ -162,6 +228,7 @@ def load_profile(path: str | Path) -> ManualProfile:
         )
 
     return ManualProfile(
+        schema_version=data.get("schema_version", ""),
         manual_id=data.get("manual_id", ""),
         manual_title=data.get("manual_title", ""),
         source_url=data.get("source_url", ""),
@@ -175,9 +242,9 @@ def load_profile(path: str | Path) -> ManualProfile:
         figure_reference_scope=figure_reference_scope,
         cross_reference_patterns=cross_reference_patterns,
         safety_callouts=safety_callouts,
-        content_types=data.get("content_types", {}),
-        ocr_cleanup=data.get("ocr_cleanup", {}),
-        variants=data.get("variants", {}),
+        content_types=_parse_content_types(data.get("content_types", {})),
+        ocr_cleanup=_parse_ocr_cleanup(data.get("ocr_cleanup", {})),
+        variants=_parse_variants(data.get("variants", {})),
     )
 
 
@@ -187,6 +254,14 @@ def validate_profile(profile: ManualProfile) -> list[str]:
     Returns a list of validation error messages. Empty list means valid.
     """
     errors: list[str] = []
+
+    if not profile.schema_version:
+        errors.append("schema_version is required and must not be empty.")
+    elif profile.schema_version != CURRENT_SCHEMA_VERSION:
+        errors.append(
+            f"schema_version '{profile.schema_version}' is not supported. "
+            f"Expected '{CURRENT_SCHEMA_VERSION}'."
+        )
 
     if not profile.manual_id:
         errors.append("manual_id is required and must not be empty.")
@@ -209,6 +284,62 @@ def validate_profile(profile: ManualProfile) -> list[str]:
 
     if not profile.hierarchy:
         errors.append("At least one hierarchy level must be defined.")
+
+    # Validate hierarchy levels are sequential (1, 2, 3...) with no gaps
+    if profile.hierarchy:
+        levels = [h.level for h in profile.hierarchy]
+        expected = list(range(1, len(levels) + 1))
+        if levels != expected:
+            errors.append(
+                f"Hierarchy levels must be sequential starting at 1. "
+                f"Got: {levels}, expected: {expected}."
+            )
+
+    # Validate all regex patterns compile
+    def _check_pattern(pattern: str | None, label: str) -> None:
+        if pattern:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                errors.append(f"Invalid {label}: {e}")
+
+    for h in profile.hierarchy:
+        _check_pattern(h.id_pattern, f"id_pattern at hierarchy level {h.level}")
+        _check_pattern(h.title_pattern, f"title_pattern at hierarchy level {h.level}")
+
+    for i, sp in enumerate(profile.step_patterns):
+        _check_pattern(sp, f"step_patterns[{i}]")
+
+    for sc in profile.safety_callouts:
+        _check_pattern(sc.pattern, f"safety callout pattern for '{sc.level}'")
+
+    _check_pattern(profile.figure_reference_pattern, "figure_reference pattern")
+    _check_pattern(profile.page_number_pattern, "page_number pattern")
+
+    for i, p in enumerate(profile.cross_reference_patterns):
+        _check_pattern(p, f"cross_reference_patterns[{i}]")
+
+    # Validate OCR known_substitutions structure
+    for i, sub in enumerate(profile.ocr_cleanup.known_substitutions):
+        if "from" not in sub or "to" not in sub:
+            errors.append(
+                f"known_substitutions[{i}] must have 'from' and 'to' keys."
+            )
+
+    # Validate safety callout levels and styles
+    valid_callout_levels = {"warning", "caution", "note"}
+    valid_callout_styles = {"block", "inline"}
+    for sc in profile.safety_callouts:
+        if sc.level not in valid_callout_levels:
+            errors.append(
+                f"Safety callout level '{sc.level}' is not valid. "
+                f"Must be one of: {', '.join(sorted(valid_callout_levels))}."
+            )
+        if sc.style not in valid_callout_styles:
+            errors.append(
+                f"Safety callout style '{sc.style}' is not valid. "
+                f"Must be one of: {', '.join(sorted(valid_callout_styles))}."
+            )
 
     return errors
 

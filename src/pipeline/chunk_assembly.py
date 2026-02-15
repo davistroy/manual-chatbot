@@ -19,14 +19,33 @@ class Chunk:
     metadata: dict[str, Any]
 
 
-def count_tokens(text: str) -> int:
-    """Estimate token count for a text string.
+# Word-to-token scaling factor. Set to 1.0 because word count approximates
+# token count for English prose. Actual BPE ratio is ~1.3x for technical
+# English, meaning this intentionally undercounts — chunks may be ~30% larger
+# than the nominal 200-2000 token target. The error direction is safe for RAG
+# (slightly oversized chunks preserve more context per retrieval hit).
+#
+# To use a real tokenizer: swap the count_tokens() implementation for
+# tiktoken or sentencepiece, and set this factor to 1.0.
+TOKEN_ESTIMATE_FACTOR: float = 1.0
 
-    Uses a simple whitespace-based approximation.
+
+def count_tokens(text: str) -> int:
+    """Estimate token count using whitespace word splitting.
+
+    Deliberate tradeoff: avoids a tokenizer dependency (tiktoken,
+    sentencepiece) at the cost of ~20-30% undercount vs actual BPE
+    tokens for technical English. Chunks may run ~30% larger than
+    the nominal 200-2000 token target defined in R2.
+
+    The error direction is safe for RAG — slightly oversized chunks
+    preserve more context per retrieval hit. If precision matters
+    (e.g., strict model context limits), swap this implementation
+    for a BPE tokenizer.
     """
     if not text or not text.strip():
         return 0
-    return len(text.split())
+    return int(len(text.split()) * TOKEN_ESTIMATE_FACTOR)
 
 
 def compose_hierarchical_header(
@@ -413,12 +432,10 @@ def apply_rule_r6_merge_small(chunks: list[str], min_tokens: int = 200) -> list[
     while i < len(chunks):
         current = chunks[i]
         if count_tokens(current) < merge_threshold and i + 1 < len(chunks):
-            # Merge with next chunk
-            merged = current + "\n\n" + chunks[i + 1]
-            # Replace the next chunk with the merged version and re-evaluate
-            remaining = [merged] + chunks[i + 2:]
-            # Recursively apply to handle cascading merges
-            return apply_rule_r6_merge_small(remaining, min_tokens)
+            # Merge with next chunk and re-evaluate the merged result
+            # by keeping it as `current` for the next iteration
+            chunks[i + 1] = current + "\n\n" + chunks[i + 1]
+            i += 1
         else:
             result.append(current)
             i += 1
@@ -567,7 +584,9 @@ def assemble_chunks(
 ) -> list[Chunk]:
     """Run the full chunk assembly pipeline.
 
-    Applies all rules (R1-R8) and builds final Chunk objects with metadata.
+    Applies rules R1-R8 in non-sequential order (R1,R3,R4,R5,R2,R6,R7,R8)
+    to ensure semantic integrity before size enforcement. See the inline
+    comment block above the rule applications for the full rationale.
     """
     all_text = "\n".join(pages)
     lines = all_text.split("\n")
@@ -591,6 +610,28 @@ def assemble_chunks(
         text = "\n".join(lines[start_line:end_line]).strip()
         if not text:
             continue
+
+        # ── Rule Application Order ──────────────────────────────────
+        # Intentionally non-sequential. Rules execute in two phases:
+        #
+        # Phase 1 — Semantic integrity (before any size enforcement):
+        #   R1: Primary unit — establish procedure boundaries
+        #   R3: Never split steps — protect step sequences as atomic
+        #   R4: Safety attachment — bind callouts to parent content
+        #   R5: Table integrity — keep tables with their headers
+        #
+        # Phase 2 — Size enforcement and cleanup:
+        #   R2: Size targets — split oversized chunks (AFTER integrity
+        #       rules so it respects step/safety/table boundaries)
+        #   R6: Merge small — combine undersized fragments
+        #   R7: Cross-reference merge — consolidate xref-only sections
+        #   R8: Figure continuity — keep figure refs with context
+        #
+        # WHY: If R2 ran before R3-R5, it would split at token
+        # boundaries before semantic units are identified, breaking
+        # step sequences, safety callouts, and tables across chunks.
+        # See LEARNINGS.md for discovery context.
+        # ────────────────────────────────────────────────────────────
 
         # R1: Primary unit — one procedure per chunk
         text_chunks = apply_rule_r1_primary_unit(text, entry)

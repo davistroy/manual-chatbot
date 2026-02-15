@@ -161,7 +161,7 @@ def clean_page(page_text: str, page_number: int, profile: ManualProfile) -> Clea
     ocr_config = profile.ocr_cleanup
 
     # 1. Apply known substitutions
-    substitutions = ocr_config.get("known_substitutions", [])
+    substitutions = ocr_config.known_substitutions
     text = apply_known_substitutions(page_text, substitutions)
 
     # Count how many substitutions were actually applied
@@ -171,16 +171,14 @@ def clean_page(page_text: str, page_number: int, profile: ManualProfile) -> Clea
         sub_count += count
 
     # 2. Strip headers/footers
-    header_footer_patterns = ocr_config.get("header_footer_patterns", [])
+    header_footer_patterns = ocr_config.header_footer_patterns
     text, extracted_page_id = strip_headers_footers(text, header_footer_patterns)
 
     # 3. Detect garbage lines
-    garbage_config = ocr_config.get("garbage_detection", {})
-    garbage_enabled = garbage_config.get("enabled", False)
-    garbage_threshold = garbage_config.get("threshold", 0.5)
+    garbage_detection = ocr_config.garbage_detection
 
-    if garbage_enabled:
-        garbage_lines = detect_garbage_lines(text, garbage_threshold)
+    if garbage_detection.enabled:
+        garbage_lines = detect_garbage_lines(text, garbage_detection.threshold)
     else:
         garbage_lines = []
 

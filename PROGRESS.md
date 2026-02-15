@@ -14,7 +14,9 @@
 | 2026-02-15 | Phase 5: Embedding and Retrieval (5.1-5.6) | src/pipeline/embeddings.py, src/pipeline/retrieval.py | 31/31 pass |
 | 2026-02-15 | Phase 6: QA and CLI (6.1-6.9) | src/pipeline/qa.py, src/pipeline/cli.py | 42/42 pass |
 
+| 2026-02-15 | Schema stability, typed profiles, architectural docs | src/pipeline/profile.py, chunk_assembly.py, ocr_cleanup.py, schema/ | 250/250 pass |
+
 ## Summary
 
-All 6 phases implemented. Full test suite: **229/229 tests passing**.
+All 6 original phases implemented, plus schema stability and documentation improvements. Full test suite: **250/250 tests passing**.
 No `NotImplementedError` remains in any source module.

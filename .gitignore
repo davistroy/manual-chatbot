@@ -218,3 +218,6 @@ desktop.ini
 *.bak
 *.tmp
 *.orig
+
+# Project-specific
+data/

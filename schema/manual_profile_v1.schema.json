@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manual_profile_v1.schema.json",
+  "title": "Manual Profile",
+  "description": "Schema for vehicle service manual YAML profiles used by the Smart Chunking Pipeline. See profile.py for the Python dataclass definitions.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "manual_id",
+    "manual_title",
+    "source_url",
+    "source_format",
+    "vehicles",
+    "structure",
+    "safety_callouts",
+    "content_types",
+    "ocr_cleanup",
+    "variants"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Profile schema version. Must match CURRENT_SCHEMA_VERSION in profile.py."
+    },
+    "manual_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this manual (e.g., 'xj-1999'). Used as prefix in chunk IDs."
+    },
+    "manual_title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable title of the manual."
+    },
+    "source_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "URL or path to the source document."
+    },
+    "source_format": {
+      "type": "string",
+      "enum": ["pdf-ocr", "pdf-native", "html", "epub"],
+      "description": "Format of the source document. Determines OCR cleanup behavior."
+    },
+    "vehicles": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Vehicles covered by this manual.",
+      "items": {
+        "type": "object",
+        "required": ["model", "years", "drive_type"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Vehicle model name (e.g., 'Cherokee XJ')."
+          },
+          "years": {
+            "type": "string",
+            "description": "Year or year range (e.g., '1999' or '1953-1971')."
+          },
+          "drive_type": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Drive types covered (e.g., ['2WD', '4WD'])."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "code"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Full engine name."
+                },
+                "code": {
+                  "type": "string",
+                  "description": "Engine code used in the manual."
+                },
+                "aliases": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Common names or abbreviations for this engine."
+                }
+              }
+            }
+          },
+          "transmissions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "code"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Full transmission name."
+                },
+                "code": {
+                  "type": "string",
+                  "description": "Transmission code used in the manual."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "structure": {
+      "type": "object",
+      "required": ["hierarchy"],
+      "description": "Structural parsing configuration.",
+      "properties": {
+        "hierarchy": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Document hierarchy levels. Must be sequential starting at 1.",
+          "items": {
+            "type": "object",
+            "required": ["level", "name"],
+            "properties": {
+              "level": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Hierarchy depth (1 = top level). Must be sequential with no gaps."
+              },
+              "name": {
+                "type": "string",
+                "description": "Human-readable level name (e.g., 'group', 'section', 'procedure')."
+              },
+              "id_pattern": {
+                "type": ["string", "null"],
+                "description": "Regex to extract the section ID from a boundary line. Null if level has no ID pattern."
+              },
+              "title_pattern": {
+                "type": ["string", "null"],
+                "description": "Regex to extract the section title from a boundary line. Null if level has no title pattern."
+              },
+              "known_ids": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "title"],
+                  "properties": {
+                    "id": { "type": "string" },
+                    "title": { "type": "string" }
+                  }
+                },
+                "description": "Known section IDs and titles for validation."
+              }
+            }
+          }
+        },
+        "page_number": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Regex to extract page numbers from text."
+            },
+            "group_prefixed": {
+              "type": "boolean",
+              "description": "Whether page numbers include a group prefix (e.g., '0-9' vs '9')."
+            }
+          }
+        },
+        "step_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns that identify numbered/lettered procedure steps."
+        },
+        "figure_reference": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Regex to detect figure references in text."
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["per-section", "global"],
+              "description": "Whether figure numbering resets per section or is global."
+            }
+          }
+        },
+        "cross_reference": {
+          "type": "object",
+          "properties": {
+            "patterns": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Regex patterns that identify cross-references to other sections."
+            }
+          }
+        }
+      }
+    },
+    "safety_callouts": {
+      "type": "array",
+      "description": "Safety callout pattern definitions.",
+      "items": {
+        "type": "object",
+        "required": ["level", "pattern", "style"],
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": ["warning", "caution", "note"],
+            "description": "Severity level of the callout."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Regex to detect this callout type in text."
+          },
+          "style": {
+            "type": "string",
+            "enum": ["block", "inline"],
+            "description": "Whether the callout is a standalone block or inline with surrounding text."
+          }
+        }
+      }
+    },
+    "content_types": {
+      "type": "object",
+      "description": "Content type metadata. Sub-field structure varies across manual types.",
+      "properties": {
+        "maintenance_schedule": {
+          "type": "object",
+          "description": "Maintenance schedule configuration (structure varies: mileage-bands, echelon-based, interval-table)."
+        },
+        "wiring_diagrams": {
+          "type": "object",
+          "description": "Wiring diagram location and configuration."
+        },
+        "specification_tables": {
+          "type": "object",
+          "description": "Specification table location (inline or end-of-section)."
+        }
+      }
+    },
+    "ocr_cleanup": {
+      "type": "object",
+      "description": "OCR cleanup configuration.",
+      "properties": {
+        "quality_estimate": {
+          "type": "string",
+          "description": "Estimated OCR quality (e.g., 'fair', 'poor', 'good')."
+        },
+        "known_substitutions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "to"],
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "OCR error text to find."
+              },
+              "to": {
+                "type": "string",
+                "description": "Correct text to substitute."
+              }
+            }
+          },
+          "description": "Known OCR misrecognitions and their corrections."
+        },
+        "header_footer_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns matching headers and footers to strip."
+        },
+        "garbage_detection": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether to detect and flag garbage lines."
+            },
+            "threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Non-ASCII character ratio above which a line is considered garbage."
+            }
+          }
+        }
+      }
+    },
+    "variants": {
+      "type": "object",
+      "description": "Market variant configuration.",
+      "properties": {
+        "has_market_variants": {
+          "type": "boolean",
+          "description": "Whether the manual has market-specific content variants."
+        },
+        "variant_indicator": {
+          "type": "string",
+          "description": "How variants are indicated (e.g., 'suffix_a', 'none')."
+        },
+        "markets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Markets covered by this manual."
+        }
+      }
+    }
+  }
+}
