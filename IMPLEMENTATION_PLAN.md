@@ -5,7 +5,7 @@
 - `PRD.pdf` — Product Requirements Document (30 pages, ~15,000 words)
 - `README.md` — Project overview and architecture summary
 - `CLAUDE.md` — Developer guide and conventions
-- `tests/` — 233 TDD tests across 9 files defining all expected behavior
+- `tests/` — 229 TDD tests across 8 test files defining all expected behavior
 - `tests/fixtures/` — 4 YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid)
 
 **Total Phases:** 6
@@ -17,7 +17,7 @@
 
 This project implements a Smart Chunking Pipeline for Vehicle Service Manual RAG. It processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot. The pipeline is profile-driven: each manual gets a YAML profile that configures OCR cleanup, structural parsing, chunk assembly, and metadata tagging.
 
-The codebase is in a TDD framework state — all 54 functions across 8 modules raise `NotImplementedError`. The 233 tests in `tests/` fully define expected behavior and serve as the implementation specification. The implementation strategy follows the pipeline's natural data flow: profile loading, OCR cleanup, structural parsing, chunk assembly, embedding/indexing, retrieval/QA/CLI.
+The codebase was built in a TDD framework style — 229 tests in `tests/` fully defined expected behavior and served as the implementation specification. All functions are now implemented and all tests pass. The implementation strategy follows the pipeline's natural data flow: profile loading, OCR cleanup, structural parsing, chunk assembly, embedding/indexing, retrieval/QA/CLI.
 
 Three target manuals drive all test fixtures: 1999 Jeep Cherokee XJ (modern, 4-level hierarchy), 1953-71 CJ Universal (classic, 3-level), and TM 9-8014 M38A1 (military, 3-level). Each has fundamentally different document conventions, making the profile-driven approach essential.
 
@@ -144,17 +144,17 @@ Pre-compile all regex pattern strings from a `ManualProfile` into `re.Pattern` o
 
 ### Phase 1 Testing Requirements
 
-- [ ] `pytest tests/test_profile.py` — all 52 tests pass
-- [ ] All 3 manual profiles load without errors
-- [ ] Invalid profile correctly caught by validation
-- [ ] Compiled patterns match expected text fragments from test fixtures
+- [x] `pytest tests/test_profile.py` — all 48 tests pass
+- [x] All 3 manual profiles load without errors
+- [x] Invalid profile correctly caught by validation
+- [x] Compiled patterns match expected text fragments from test fixtures
 
 ### Phase 1 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 52 profile tests passing
-- [ ] No regressions introduced
-- [ ] `ManualProfile` dataclass correctly populated for all 3 target manuals
+- [x] All work items complete
+- [x] All 48 profile tests passing
+- [x] No regressions introduced
+- [x] `ManualProfile` dataclass correctly populated for all 3 target manuals
 
 ---
 
@@ -325,16 +325,16 @@ Run quality assessment on a list of `CleanedPage` objects. Sample up to `sample_
 
 ### Phase 2 Testing Requirements
 
-- [ ] `pytest tests/test_ocr_cleanup.py` — all 28 tests pass
-- [ ] All 3 manual sample texts cleaned correctly
-- [ ] Dirty OCR text fixture normalized properly
+- [x] `pytest tests/test_ocr_cleanup.py` — all 39 tests pass
+- [x] All 3 manual sample texts cleaned correctly
+- [x] Dirty OCR text fixture normalized properly
 
 ### Phase 2 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 28 OCR cleanup tests passing
-- [ ] All Phase 1 tests still passing (no regressions)
-- [ ] CleanedPage objects preserve full audit trail
+- [x] All work items complete
+- [x] All 39 OCR cleanup tests passing
+- [x] All Phase 1 tests still passing (no regressions)
+- [x] CleanedPage objects preserve full audit trail
 
 ---
 
@@ -454,17 +454,17 @@ Construct a hierarchical `Manifest` from detected boundaries. Each boundary beco
 
 ### Phase 3 Testing Requirements
 
-- [ ] `pytest tests/test_structural_parser.py` — all 24 tests pass
-- [ ] Chunk IDs generated in correct format for all 3 manuals
-- [ ] Boundaries detected from all 3 manual sample texts
-- [ ] Manifest hierarchy correctly built
+- [x] `pytest tests/test_structural_parser.py` — all 28 tests pass
+- [x] Chunk IDs generated in correct format for all 3 manuals
+- [x] Boundaries detected from all 3 manual sample texts
+- [x] Manifest hierarchy correctly built
 
 ### Phase 3 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 24 structural parser tests passing
-- [ ] All Phase 1-2 tests still passing (no regressions)
-- [ ] Manifest correctly represents document hierarchy
+- [x] All work items complete
+- [x] All 28 structural parser tests passing
+- [x] All Phase 1-2 tests still passing (no regressions)
+- [x] Manifest correctly represents document hierarchy
 
 ---
 
@@ -757,15 +757,15 @@ Orchestrate the full chunk assembly pipeline: extract text per manifest entry, a
 
 ### Phase 4 Testing Requirements
 
-- [ ] `pytest tests/test_chunk_assembly.py` — all 47 tests pass
-- [ ] All 8 rules tested independently and in pipeline
-- [ ] Vehicle tagging works for all 3 manual types
+- [x] `pytest tests/test_chunk_assembly.py` — all 41 tests pass
+- [x] All 8 rules tested independently and in pipeline
+- [x] Vehicle tagging works for all 3 manual types
 
 ### Phase 4 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 47 chunk assembly tests passing
-- [ ] All Phase 1-3 tests still passing (no regressions)
+- [x] All work items complete
+- [x] All 41 chunk assembly tests passing
+- [x] All Phase 1-3 tests still passing (no regressions)
 
 ---
 
@@ -916,14 +916,14 @@ Enrich retrieval results with contextual chunks: parent for section overview, si
 
 ### Phase 5 Testing Requirements
 
-- [ ] `pytest tests/test_embeddings.py` — all 14 tests pass
-- [ ] `pytest tests/test_retrieval.py` — all 18 tests pass
+- [x] `pytest tests/test_embeddings.py` — all 12 tests pass
+- [x] `pytest tests/test_retrieval.py` — all 19 tests pass
 
 ### Phase 5 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 32 embedding + retrieval tests passing
-- [ ] All Phase 1-4 tests still passing (no regressions)
+- [x] All work items complete
+- [x] All 31 embedding + retrieval tests passing
+- [x] All Phase 1-4 tests still passing (no regressions)
 
 ---
 
@@ -1123,15 +1123,15 @@ Build `ArgumentParser` with 4 subcommands: `process`, `bootstrap-profile`, `vali
 
 ### Phase 6 Testing Requirements
 
-- [ ] `pytest tests/test_qa.py` — all 39 tests pass
-- [ ] `pytest tests/test_cli.py` — all 11 tests pass
+- [x] `pytest tests/test_qa.py` — all 31 tests pass
+- [x] `pytest tests/test_cli.py` — all 11 tests pass
 
 ### Phase 6 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All 50 QA + CLI tests passing
-- [ ] Full test suite passes: `pytest` — all 233 tests green
-- [ ] No regressions across any phase
+- [x] All work items complete
+- [x] All 42 QA + CLI tests passing
+- [x] Full test suite passes: `pytest` — all 229 tests green
+- [x] No regressions across any phase
 
 ---
 
@@ -1165,13 +1165,13 @@ Build `ArgumentParser` with 4 subcommands: `process`, `bootstrap-profile`, `vali
 
 ## Success Metrics
 
-- [ ] All 6 phases completed
-- [ ] All 233 tests passing (`pytest` exits with code 0)
-- [ ] All acceptance criteria met for every work item
-- [ ] No `NotImplementedError` remains in any source module
-- [ ] Pipeline processes all 3 target manuals (XJ, CJ, TM9) through full chain
-- [ ] Chunk validation suite reports no errors on well-formed chunks
-- [ ] CLI accepts and dispatches all 4 subcommands correctly
+- [x] All 6 phases completed
+- [x] All 229 tests passing (`pytest` exits with code 0)
+- [x] All acceptance criteria met for every work item
+- [x] No `NotImplementedError` remains in any source module
+- [x] Pipeline processes all 3 target manuals (XJ, CJ, TM9) through full chain
+- [x] Chunk validation suite reports no errors on well-formed chunks
+- [x] CLI accepts and dispatches all 4 subcommands correctly
 
 ---
 
