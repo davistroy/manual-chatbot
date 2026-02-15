@@ -4,7 +4,7 @@
 
 Smart Chunking Pipeline for Vehicle Service Manual RAG. Processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot.
 
-**Current state**: Fully implemented — all 229 tests pass. The codebase was built TDD-style: tests were written first as the specification, then all source functions were implemented.
+**Current state**: Fully implemented — all 250 tests pass. The codebase was built TDD-style: tests were written first as the specification, then all source functions were implemented. Profile schema is versioned (v1.0) with typed dataclasses and expanded validation.
 
 ## Quick Reference
 

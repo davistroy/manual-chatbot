@@ -24,7 +24,7 @@ This pipeline processes PDF service manuals from different manufacturers, eras, 
 
 ## Current Status
 
-All pipeline components are **fully implemented** and passing the complete test suite (229/229 tests). The codebase was developed using TDD — the 229 tests were written first to define expected behavior, then all source functions were implemented to satisfy them.
+All pipeline components are **fully implemented** and passing the complete test suite (250/250 tests). The codebase was developed using TDD — the 229 tests were written first to define expected behavior, then all source functions were implemented to satisfy them.
 
 ## Project Structure
 
@@ -32,9 +32,11 @@ All pipeline components are **fully implemented** and passing the complete test 
 manual-chatbot/
   pyproject.toml              # Package config, dependencies, pytest settings
   PRD.pdf                     # Detailed product requirements document (30 pages)
-  IMPLEMENTATION_PLAN.md      # 6-phase implementation plan with work items
-  PROGRESS.md                 # Implementation progress log (all phases complete)
+  IMPLEMENTATION_PLAN.md      # Implementation plan with work items
+  PROGRESS.md                 # Implementation progress log
   LEARNINGS.md                # Issues encountered and solutions discovered
+  schema/
+    manual_profile_v1.schema.json  # JSON Schema for YAML profiles
   src/
     pipeline/
       __init__.py
@@ -61,6 +63,7 @@ manual-chatbot/
     test_retrieval.py
     test_qa.py
     test_cli.py
+    test_integration.py       # End-to-end pipeline tests with real PDFs
 ```
 
 ## Pipeline Architecture
@@ -127,7 +130,7 @@ Run only unit tests:
 pytest -m unit
 ```
 
-## CLI Usage (planned)
+## CLI Usage
 
 ```bash
 # Process a single manual
