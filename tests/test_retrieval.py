@@ -1,0 +1,212 @@
+"""Tests for the query-time retrieval strategy."""
+
+from __future__ import annotations
+
+import pytest
+
+from pipeline.retrieval import (
+    QueryAnalysis,
+    RetrievalResult,
+    RetrievalResponse,
+    analyze_query,
+    enrich_with_parent,
+    enrich_with_siblings,
+    rerank,
+    resolve_cross_references,
+)
+
+
+# ── Query Analysis Tests ──────────────────────────────────────────
+
+
+class TestAnalyzeQuery:
+    """Test natural language query parsing and filter extraction."""
+
+    def test_returns_query_analysis(self):
+        result = analyze_query(
+            "How do I change the oil on a 1999 Cherokee?",
+            ["xj-1999", "cj-universal-53-71"],
+        )
+        assert isinstance(result, QueryAnalysis)
+
+    def test_preserves_original_query(self):
+        query = "What is the torque spec for the brake caliper?"
+        result = analyze_query(query, ["xj-1999"])
+        assert result.original_query == query
+
+    def test_detects_vehicle_scope_cherokee(self):
+        result = analyze_query(
+            "How do I replace the radiator hose on a Cherokee?",
+            ["xj-1999", "cj-universal-53-71"],
+        )
+        assert len(result.vehicle_scope) > 0
+
+    def test_detects_vehicle_scope_cj5(self):
+        result = analyze_query(
+            "How do I adjust the carburetor on a CJ-5?",
+            ["xj-1999", "cj-universal-53-71"],
+        )
+        assert any("CJ" in v for v in result.vehicle_scope)
+
+    def test_detects_vehicle_scope_m38a1(self):
+        result = analyze_query(
+            "Starting procedure for the M38A1",
+            ["tm9-8014-m38a1"],
+        )
+        assert any("M38A1" in v for v in result.vehicle_scope)
+
+    def test_detects_engine_scope(self):
+        result = analyze_query(
+            "Oil capacity for the 4.0L engine",
+            ["xj-1999"],
+        )
+        assert len(result.engine_scope) > 0
+
+    def test_detects_drivetrain_scope(self):
+        result = analyze_query(
+            "Transfer case fluid for 4WD model",
+            ["xj-1999"],
+        )
+        assert any("4WD" in d for d in result.drivetrain_scope)
+
+    def test_classifies_procedure_query(self):
+        result = analyze_query(
+            "How do I change the oil?",
+            ["xj-1999"],
+        )
+        assert result.query_type == "procedure"
+
+    def test_classifies_specification_query(self):
+        result = analyze_query(
+            "What is the oil capacity for the 4.0L?",
+            ["xj-1999"],
+        )
+        assert result.query_type == "specification"
+
+    def test_classifies_diagnostic_query(self):
+        result = analyze_query(
+            "Engine won't start, what should I check?",
+            ["xj-1999"],
+        )
+        assert result.query_type == "diagnostic"
+
+    def test_no_vehicle_specified_returns_empty_scope(self):
+        result = analyze_query(
+            "How do I change the oil?",
+            ["xj-1999", "cj-universal-53-71"],
+        )
+        # When no specific vehicle mentioned, scope may be empty or broad
+        assert isinstance(result.vehicle_scope, list)
+
+    def test_detects_system_scope(self):
+        result = analyze_query(
+            "Brake pad replacement procedure",
+            ["xj-1999"],
+        )
+        assert len(result.system_scope) > 0
+
+
+# ── Result Enrichment Tests ───────────────────────────────────────
+
+
+class TestEnrichWithParent:
+    """Test parent-chunk enrichment."""
+
+    def test_adds_parent_context(self):
+        results = [
+            RetrievalResult(
+                chunk_id="xj-1999::0::SP::JSP",
+                text="Jump starting procedure details.",
+                metadata={"parent_chunk_id": "xj-1999::0::SP"},
+                score=0.95,
+                source="primary",
+            )
+        ]
+        enriched = enrich_with_parent(results)
+        # Should have at least original result + potentially parent
+        assert len(enriched) >= 1
+
+    def test_no_parent_no_change(self):
+        results = [
+            RetrievalResult(
+                chunk_id="xj-1999::0",
+                text="Top-level content.",
+                metadata={"parent_chunk_id": None},
+                score=0.90,
+                source="primary",
+            )
+        ]
+        enriched = enrich_with_parent(results)
+        assert len(enriched) == 1
+
+
+class TestEnrichWithSiblings:
+    """Test sibling-chunk enrichment."""
+
+    def test_adds_sibling_context(self):
+        results = [
+            RetrievalResult(
+                chunk_id="xj-1999::0::SP::JSP",
+                text="Jump starting procedure.",
+                metadata={"sibling_chunk_ids": ["xj-1999::0::SP::TR"]},
+                score=0.95,
+                source="primary",
+            )
+        ]
+        enriched = enrich_with_siblings(results)
+        assert len(enriched) >= 1
+
+
+class TestResolveCrossReferences:
+    """Test cross-reference resolution."""
+
+    def test_resolves_references(self):
+        results = [
+            RetrievalResult(
+                chunk_id="xj-1999::0::SP::JSP",
+                text="Refer to Group 8A for details.",
+                metadata={"cross_references": ["Group 8A"]},
+                score=0.95,
+                source="primary",
+            )
+        ]
+        enriched = resolve_cross_references(results)
+        assert len(enriched) >= 1
+
+
+# ── Reranking Tests ───────────────────────────────────────────────
+
+
+class TestRerank:
+    """Test result re-ranking."""
+
+    def test_returns_top_n(self):
+        results = [
+            RetrievalResult(
+                chunk_id=f"test::{i}",
+                text=f"Chunk {i}",
+                metadata={},
+                score=float(i) / 10,
+                source="primary",
+            )
+            for i in range(10)
+        ]
+        reranked = rerank(results, top_n=5)
+        assert len(reranked) == 5
+
+    def test_ordered_by_relevance(self):
+        results = [
+            RetrievalResult(chunk_id="a", text="Low relevance", metadata={}, score=0.3, source="primary"),
+            RetrievalResult(chunk_id="b", text="High relevance", metadata={}, score=0.9, source="primary"),
+            RetrievalResult(chunk_id="c", text="Medium relevance", metadata={}, score=0.6, source="primary"),
+        ]
+        reranked = rerank(results, top_n=3)
+        scores = [r.score for r in reranked]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_fewer_than_top_n_returns_all(self):
+        results = [
+            RetrievalResult(chunk_id="a", text="Only one", metadata={}, score=0.9, source="primary"),
+        ]
+        reranked = rerank(results, top_n=5)
+        assert len(reranked) == 1

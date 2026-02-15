@@ -1,0 +1,101 @@
+manual_id: "cj-universal-53-71"
+manual_title: "1953-71 Jeep Universal Series Service Manual (SM-1046)"
+source_url: "https://example.com/cj-manual.pdf"
+source_format: "pdf-ocr"
+
+vehicles:
+  - model: "CJ-3B"
+    years: "1953-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane", "four cylinder", "F4", "134 cubic inch"]
+  - model: "CJ-5"
+    years: "1955-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane", "four cylinder", "F4"]
+      - name: "Dauntless V-6 225"
+        code: "V6"
+        aliases: ["V-6", "V6", "Dauntless", "V-6 225", "225", "V6-225"]
+  - model: "DJ-5"
+    years: "1965-1971"
+    drive_type: ["2WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "section"
+      id_pattern: "^([A-Z])\\s"
+      title_pattern: "^[A-Z]\\s+(.+)"
+      known_ids:
+        - { id: "A", title: "General Data" }
+        - { id: "B", title: "Lubrication and Periodic Services" }
+        - { id: "C", title: "Tune-Up" }
+        - { id: "D", title: "Hurricane F4 Engine" }
+        - { id: "H", title: "Electrical" }
+    - level: 2
+      name: "paragraph"
+      id_pattern: "^([A-Z]\\d?-\\d+)\\.\\s"
+      title_pattern: "^[A-Z]\\d?-\\d+\\.\\s+(.+)"
+    - level: 3
+      name: "sub-paragraph"
+      id_pattern: null
+      title_pattern: null
+  page_number:
+    pattern: "^(\\d+)$"
+    group_prefixed: false
+  step_patterns:
+    - "^([a-z])\\.\\s"
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "FIG\\.\\s+([A-Z]\\d?-\\d+)"
+    scope: "per-section"
+  cross_reference:
+    patterns:
+      - "Refer to Par\\.\\s+([A-Z]\\d?-\\d+)"
+      - "(?:See|Refer to)\\s+Section\\s+([A-Z]\\d?)"
+
+safety_callouts:
+  - level: "caution"
+    pattern: "^Caution:"
+    style: "inline"
+  - level: "note"
+    pattern: "^Note:"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: true
+    structure: "interval-table"
+    description: "Single service maintenance schedule as a table."
+  wiring_diagrams:
+    present: true
+    section_id: "H"
+  specification_tables:
+    location: "end-of-section"
+
+ocr_cleanup:
+  quality_estimate: "fair"
+  known_substitutions:
+    - { from: "'Jeep'", to: "Jeep" }
+    - { from: "UNIVERSA L", to: "UNIVERSAL" }
+    - { from: "SERIE S", to: "SERIES" }
+  header_footer_patterns:
+    - "^'?Jeep[*']?\\s+UNIVERSA?L\\s+SERIE?S\\s+SERVIC?E\\s+MANUAL"
+    - "^[A-Z]\\s+[A-Z ]+$"
+  garbage_detection:
+    enabled: true
+    threshold: 0.4
+
+variants:
+  has_market_variants: false
+  variant_indicator: "none"
+  markets: ["US"]

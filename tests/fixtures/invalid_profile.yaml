@@ -1,0 +1,36 @@
+# Intentionally invalid profile — missing required fields for validation testing
+manual_id: "invalid"
+manual_title: ""
+# source_url: missing
+source_format: "unknown-format"
+
+vehicles: []
+
+structure:
+  hierarchy: []
+  page_number:
+    pattern: ""
+    group_prefixed: false
+  step_patterns: []
+  figure_reference:
+    pattern: ""
+    scope: "invalid-scope"
+  cross_reference:
+    patterns: []
+
+safety_callouts: []
+
+content_types: {}
+
+ocr_cleanup:
+  quality_estimate: "unknown"
+  known_substitutions: []
+  header_footer_patterns: []
+  garbage_detection:
+    enabled: false
+    threshold: 0.0
+
+variants:
+  has_market_variants: false
+  variant_indicator: "none"
+  markets: []

@@ -1,0 +1,104 @@
+manual_id: "xj-1999"
+manual_title: "1999 Jeep Cherokee (XJ) Factory Service Manual"
+source_url: "https://example.com/xj-manual.pdf"
+source_format: "pdf-ocr"
+
+vehicles:
+  - model: "Cherokee XJ"
+    years: "1999"
+    drive_type: ["2WD", "4WD"]
+    engines:
+      - name: "2.5L I4 MPI Gasoline"
+        code: "EPE"
+        aliases: ["2.5L", "2.5", "four cylinder", "I4", "2.5 liter"]
+      - name: "4.0L I6 MPI Gasoline"
+        code: "ERH"
+        aliases: ["4.0L", "4.0", "six cylinder", "inline 6", "I6", "4.0 liter"]
+      - name: "2.5L I4 Diesel"
+        code: "diesel"
+        aliases: ["2.5L diesel", "diesel", "turbo diesel"]
+    transmissions:
+      - name: "AX5 5-Speed Manual"
+        code: "DDQ"
+      - name: "AW4 4-Speed Automatic"
+        code: "DGS"
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "group"
+      id_pattern: "^(\\d+[A-Z]?[a-z]?)\\s"
+      title_pattern: "^\\d+[A-Z]?[a-z]?\\s+(.+)"
+      known_ids:
+        - { id: "0", title: "Lubrication and Maintenance" }
+        - { id: "2", title: "Suspension" }
+        - { id: "5", title: "Brakes" }
+        - { id: "7", title: "Cooling System" }
+        - { id: "8A", title: "Battery" }
+        - { id: "8W", title: "Wiring Diagrams" }
+        - { id: "9", title: "Engine" }
+        - { id: "14", title: "Fuel System" }
+    - level: 2
+      name: "section"
+      id_pattern: "^([A-Z][A-Z ]{3,})$"
+      title_pattern: "^([A-Z][A-Z ]{3,})$"
+    - level: 3
+      name: "procedure"
+      id_pattern: null
+      title_pattern: "^([A-Z][A-Z \\-\\/\\(\\)]{5,})$"
+    - level: 4
+      name: "sub-procedure"
+      id_pattern: null
+      title_pattern: "^([A-Z][A-Z \\-]+\\([A-Z ]+\\))$"
+  page_number:
+    pattern: "(?:XJ\\s+)?(?:[A-Z ]+)\\s+(\\d+[A-Z]?)\\s*-\\s*(\\d+)"
+    group_prefixed: true
+  step_patterns:
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "\\(Fig\\.\\s+(\\d+)\\)"
+    scope: "per-section"
+  cross_reference:
+    patterns:
+      - "Refer to Group (\\d+[A-Z]?)"
+      - "Refer to (Section \\d+)"
+
+safety_callouts:
+  - level: "warning"
+    pattern: "^WARNING:"
+    style: "block"
+  - level: "caution"
+    pattern: "^CAUTION:"
+    style: "block"
+  - level: "note"
+    pattern: "^NOTE:"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: true
+    structure: "mileage-bands"
+    description: "Two schedules (A and B) with mileage intervals."
+  wiring_diagrams:
+    present: true
+    section_id: "8W"
+  specification_tables:
+    location: "inline"
+
+ocr_cleanup:
+  quality_estimate: "fair"
+  known_substitutions:
+    - { from: "IJURY", to: "INJURY" }
+    - { from: "Mopart", to: "Mopar" }
+  header_footer_patterns:
+    - "^XJ\\s+[A-Z ]+\\d+[A-Z]?\\s*-\\s*\\d+"
+    - "^\\d+[A-Z]?\\s*-\\s*\\d+\\s+[A-Z ]+XJ$"
+    - "\\(Continued\\)$"
+  garbage_detection:
+    enabled: true
+    threshold: 0.5
+
+variants:
+  has_market_variants: true
+  variant_indicator: "suffix_a"
+  markets: ["domestic", "international"]

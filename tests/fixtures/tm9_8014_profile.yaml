@@ -1,0 +1,104 @@
+manual_id: "tm9-8014-m38a1"
+manual_title: "TM 9-8014: Operation and Organizational Maintenance"
+source_url: "https://example.com/tm9-8014.pdf"
+source_format: "pdf-ocr"
+
+vehicles:
+  - model: "M38A1"
+    years: "1952-1957"
+    drive_type: ["4WD"]
+    engines:
+      - name: "F-head I4 (Hurricane)"
+        code: "F-head"
+        aliases: ["F-head", "four-cylinder", "Hurricane"]
+    transmissions:
+      - name: "T-90 3-Speed Synchromesh"
+        code: "T-90"
+  - model: "M170"
+    years: "1953-1957"
+    drive_type: ["4WD"]
+    engines:
+      - name: "F-head I4 (Hurricane)"
+        code: "F-head"
+        aliases: ["F-head", "four-cylinder", "Hurricane"]
+    transmissions:
+      - name: "T-90 3-Speed Synchromesh"
+        code: "T-90"
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "chapter"
+      id_pattern: "^CHAPTER\\s+(\\d+)"
+      title_pattern: "^CHAPTER\\s+\\d+\\.\\s+(.+)"
+      known_ids:
+        - { id: "1", title: "Introduction" }
+        - { id: "2", title: "Operating Instructions" }
+        - { id: "3", title: "Organizational Maintenance Instructions" }
+        - { id: "4", title: "Shipment and Limited Storage" }
+    - level: 2
+      name: "section"
+      id_pattern: "^Section\\s+([IVXLC]+)\\.?"
+      title_pattern: "^Section\\s+[IVXLC]+\\.?\\s+(.+)"
+    - level: 3
+      name: "paragraph"
+      id_pattern: "^(\\d+)\\.\\s"
+      title_pattern: "^\\d+\\.\\s+(.+)"
+    - level: 4
+      name: "sub-paragraph"
+      id_pattern: "^([a-z])\\.\\s"
+      title_pattern: null
+  page_number:
+    pattern: "^(\\d+)$"
+    group_prefixed: false
+  step_patterns:
+    - "^([a-z])\\.\\s"
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "fig\\.?\\s+(\\d+)"
+    scope: "global"
+  cross_reference:
+    patterns:
+      - "par\\.?\\s+(\\d+[a-z]?)"
+      - "fig\\.?\\s+(\\d+)"
+
+safety_callouts:
+  - level: "warning"
+    pattern: "^Warning:"
+    style: "inline"
+  - level: "caution"
+    pattern: "^Caution:"
+    style: "inline"
+  - level: "note"
+    pattern: "^Note[.:]"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: true
+    structure: "echelon-based"
+    description: "Military PM services organized by echelon."
+  wiring_diagrams:
+    present: true
+    section_id: "Chapter 3, Section XVI-XIX"
+  specification_tables:
+    location: "inline"
+
+ocr_cleanup:
+  quality_estimate: "poor"
+  known_substitutions:
+    - { from: "TECHNIG~MANUAL", to: "TECHNICAL MANUAL" }
+    - { from: "CHAPTEIR", to: "CHAPTER" }
+    - { from: "Generd", to: "General" }
+    - { from: "persomlel", to: "personnel" }
+  header_footer_patterns:
+    - "^\\*?TM\\s+9-8014"
+    - "^\\d{5,}-\\d{2}-\\d+"
+  garbage_detection:
+    enabled: true
+    threshold: 0.3
+
+variants:
+  has_market_variants: false
+  variant_indicator: "none"
+  markets: ["US military"]
