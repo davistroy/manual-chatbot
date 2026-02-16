@@ -1,18 +1,19 @@
 # Implementation Plan: REVIEW.md Remediation
 
 **Generated:** 2026-02-16
+**Completed:** 2026-02-16
 **Based On:** RECOMMENDATIONS.md (derived from REVIEW.md architectural audit + codebase analysis)
 **Supersedes:** Previous IMPLEMENTATION_PLAN.md (2026-02-15, completed — schema stability/documentation)
-**Total Phases:** 4
-**Estimated Total Effort:** ~200,000 tokens
+**Total Phases:** 4 (all complete)
+**Final Test Count:** 349 tests passing
 
 ---
 
 ## Plan Overview
 
-This plan addresses the remediation roadmap from the architectural review (REVIEW.md) plus additional findings from deep codebase analysis. The previous implementation plan (schema stability, typed profiles, documentation) is complete — all 250 tests pass.
+This plan addresses the remediation roadmap from the architectural review (REVIEW.md) plus additional findings from deep codebase analysis. **All 4 phases are now complete — 349 tests passing as of 2026-02-16.**
 
-The strategy is: **fix data integrity first** (Phase 1), **then reliability** (Phase 2), **then output quality and persistence** (Phase 3), **then developer experience** (Phase 4). Each phase leaves the codebase in a working state with all tests passing.
+The strategy was: **fix data integrity first** (Phase 1), **then reliability** (Phase 2), **then output quality and persistence** (Phase 3), **then developer experience** (Phase 4). Each phase left the codebase in a working state with all tests passing.
 
 ### Phase Summary Table
 
@@ -54,18 +55,18 @@ The strategy is: **fix data integrity first** (Phase 1), **then reliability** (P
 Fix: track a running `global_line_offset` in `detect_boundaries()`. Before iterating each page's lines, compute `global_offset = sum(len(pages[p].split("\n")) for p in range(page_idx))` (or accumulate incrementally). Store `boundary.line_number = global_offset + line_idx`.
 
 **Tasks:**
-1. [ ] Add multi-page test fixtures to `conftest.py` — at least 2 pages with boundaries on each page
-2. [ ] Write failing test: process 2 pages through `detect_boundaries` → `build_manifest` → `assemble_chunks`, assert chunk text matches expected content from the correct page
-3. [ ] Fix `detect_boundaries()` in `structural_parser.py` to use global line offsets
-4. [ ] Update `build_manifest()` if needed (it passes through boundary.line_number — should work once boundaries are correct)
-5. [ ] Update existing tests in `test_structural_parser.py` that assert per-page line numbers — these should now assert global offsets
-6. [ ] Run full test suite — all 250+ tests must pass
+1. [x] Add multi-page test fixtures to `conftest.py` — at least 2 pages with boundaries on each page
+2. [x] Write failing test: process 2 pages through `detect_boundaries` → `build_manifest` → `assemble_chunks`, assert chunk text matches expected content from the correct page
+3. [x] Fix `detect_boundaries()` in `structural_parser.py` to use global line offsets
+4. [x] Update `build_manifest()` if needed (it passes through boundary.line_number — should work once boundaries are correct)
+5. [x] Update existing tests in `test_structural_parser.py` that assert per-page line numbers — these should now assert global offsets
+6. [x] Run full test suite — all 250+ tests must pass
 
 **Acceptance Criteria:**
-- [ ] Multi-page test demonstrates correct chunk text extraction from page 2+
-- [ ] Boundary line numbers are global (absolute) offsets, not per-page
-- [ ] `assemble_chunks()` produces correct text for multi-page manuals without any changes to its own code
-- [ ] All existing tests pass (with updated line number expectations)
+- [x] Multi-page test demonstrates correct chunk text extraction from page 2+
+- [x] Boundary line numbers are global (absolute) offsets, not per-page
+- [x] `assemble_chunks()` produces correct text for multi-page manuals without any changes to its own code
+- [x] All existing tests pass (with updated line number expectations)
 
 ---
 
@@ -81,18 +82,18 @@ Fix: track a running `global_line_offset` in `detect_boundaries()`. Before itera
 Add `manual_id`, `level1_id`, and `procedure_name` to the chunk metadata dict in `assemble_chunks()`. Currently QA's `check_metadata_completeness` always flags missing `manual_id` and `level1_id`, and the SQLite index writes empty strings for `procedure_name` and `level1_id`.
 
 **Tasks:**
-1. [ ] Add `"manual_id": manifest.manual_id` to the metadata dict at `chunk_assembly.py:682`
-2. [ ] Extract `level1_id` from `entry.hierarchy_path[0]` if available, else from chunk_id parsing. Add to metadata.
-3. [ ] Add `"procedure_name": entry.title` to metadata
-4. [ ] Update `test_chunk_assembly.py` tests that assert metadata keys
-5. [ ] Verify `test_qa.py` metadata_completeness tests pass without false errors
-6. [ ] Verify `embeddings.py` SQLite index now gets real values for `level1_id` and `procedure_name`
+1. [x] Add `"manual_id": manifest.manual_id` to the metadata dict at `chunk_assembly.py:682`
+2. [x] Extract `level1_id` from `entry.hierarchy_path[0]` if available, else from chunk_id parsing. Add to metadata.
+3. [x] Add `"procedure_name": entry.title` to metadata
+4. [x] Update `test_chunk_assembly.py` tests that assert metadata keys
+5. [x] Verify `test_qa.py` metadata_completeness tests pass without false errors
+6. [x] Verify `embeddings.py` SQLite index now gets real values for `level1_id` and `procedure_name`
 
 **Acceptance Criteria:**
-- [ ] `chunk.metadata` contains `manual_id`, `level1_id`, `content_type`, `procedure_name`
-- [ ] QA `check_metadata_completeness` passes for correctly formed chunks
-- [ ] SQLite `procedure_lookup` gets meaningful data
-- [ ] All tests pass
+- [x] `chunk.metadata` contains `manual_id`, `level1_id`, `content_type`, `procedure_name`
+- [x] QA `check_metadata_completeness` passes for correctly formed chunks
+- [x] SQLite `procedure_lookup` gets meaningful data
+- [x] All tests pass
 
 ---
 
@@ -107,36 +108,36 @@ Add `manual_id`, `level1_id`, and `procedure_name` to the chunk metadata dict in
 `compose_embedding_input()` splits `chunk.text` on the first `\n\n` thinking the header is baked into the text. It's not — the header is in `chunk.metadata["hierarchical_header"]`. The function should use the metadata header + body text.
 
 **Tasks:**
-1. [ ] Rewrite `compose_embedding_input()` to read header from `chunk.metadata["hierarchical_header"]`
-2. [ ] Build embedding text as `f"{header}\n\n{get_first_n_words(chunk.text, 150)}"`
-3. [ ] Remove the `\n\n` split logic (dead code after fix)
-4. [ ] Handle missing `hierarchical_header` key gracefully (fallback to text-only)
-5. [ ] Update tests in `test_embeddings.py` — construct chunks with metadata header and verify output
-6. [ ] Run full test suite
+1. [x] Rewrite `compose_embedding_input()` to read header from `chunk.metadata["hierarchical_header"]`
+2. [x] Build embedding text as `f"{header}\n\n{get_first_n_words(chunk.text, 150)}"`
+3. [x] Remove the `\n\n` split logic (dead code after fix)
+4. [x] Handle missing `hierarchical_header` key gracefully (fallback to text-only)
+5. [x] Update tests in `test_embeddings.py` — construct chunks with metadata header and verify output
+6. [x] Run full test suite
 
 **Acceptance Criteria:**
-- [ ] Embedding input includes hierarchical context (manual > group > section > procedure)
-- [ ] Body text is truncated to 150 words
-- [ ] Old `\n\n` split logic is removed
-- [ ] Graceful fallback when metadata key is missing
-- [ ] All tests pass
+- [x] Embedding input includes hierarchical context (manual > group > section > procedure)
+- [x] Body text is truncated to 150 words
+- [x] Old `\n\n` split logic is removed
+- [x] Graceful fallback when metadata key is missing
+- [x] All tests pass
 
 ---
 
 ### Phase 1 Testing Requirements
 
-- [ ] Multi-page boundary/chunking test catches the coordinate bug and passes after fix
-- [ ] Metadata completeness QA check passes for well-formed chunks
-- [ ] Embedding composition tests verify header comes from metadata
-- [ ] All 250+ existing tests pass
-- [ ] New tests added: ~10-15
+- [x] Multi-page boundary/chunking test catches the coordinate bug and passes after fix
+- [x] Metadata completeness QA check passes for well-formed chunks
+- [x] Embedding composition tests verify header comes from metadata
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~10-15
 
 ### Phase 1 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing (`pytest -v --tb=short`)
-- [ ] LEARNINGS.md updated with coordinate model decision
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing (`pytest -v --tb=short`)
+- [x] LEARNINGS.md updated with coordinate model decision
+- [x] No regressions introduced
 
 ---
 
@@ -167,18 +168,18 @@ Add `manual_id`, `level1_id`, and `procedure_name` to the chunk metadata dict in
 Add `timeout=30` to `requests.post()`. Add retry logic (3 attempts with exponential backoff) for transient errors.
 
 **Tasks:**
-1. [ ] Add `timeout=30` parameter to `requests.post()` at `embeddings.py:79`
-2. [ ] Wrap the request in a retry loop: 3 attempts, `time.sleep(2 ** attempt)` between failures
-3. [ ] Catch `requests.exceptions.ConnectionError`, `requests.exceptions.Timeout`, and 5xx responses
-4. [ ] Raise `RuntimeError(f"Embedding generation failed after 3 attempts: {last_error}")` on exhaustion
-5. [ ] Add test: mock `requests.post` to raise `ConnectionError` once then succeed — verify retry works
-6. [ ] Add test: mock `requests.post` to always fail — verify RuntimeError after 3 attempts
+1. [x] Add `timeout=30` parameter to `requests.post()` at `embeddings.py:79`
+2. [x] Wrap the request in a retry loop: 3 attempts, `time.sleep(2 ** attempt)` between failures
+3. [x] Catch `requests.exceptions.ConnectionError`, `requests.exceptions.Timeout`, and 5xx responses
+4. [x] Raise `RuntimeError(f"Embedding generation failed after 3 attempts: {last_error}")` on exhaustion
+5. [x] Add test: mock `requests.post` to raise `ConnectionError` once then succeed — verify retry works
+6. [x] Add test: mock `requests.post` to always fail — verify RuntimeError after 3 attempts
 
 **Acceptance Criteria:**
-- [ ] `requests.post()` has `timeout=30`
-- [ ] Transient failures are retried up to 3 times
-- [ ] Permanent failures raise `RuntimeError` with clear message
-- [ ] All tests pass
+- [x] `requests.post()` has `timeout=30`
+- [x] Transient failures are retried up to 3 times
+- [x] Permanent failures raise `RuntimeError` with clear message
+- [x] All tests pass
 
 ---
 
@@ -193,18 +194,18 @@ Add `timeout=30` to `requests.post()`. Add retry logic (3 attempts with exponent
 Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are visible. Add `retrieval_warnings: list[str]` field to `RetrievalResponse`.
 
 **Tasks:**
-1. [ ] Add `import warnings` to `retrieval.py`
-2. [ ] Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
-3. [ ] Add `retrieval_warnings: list[str] = field(default_factory=list)` to `RetrievalResponse`
-4. [ ] Capture warnings in `retrieve()` and add to response
-5. [ ] Add test: mock SQLite to raise `sqlite3.OperationalError`, verify warning is issued and partial results returned
-6. [ ] Document placeholder results in `enrich_with_parent()` and `enrich_with_siblings()` with clear comments
+1. [x] Add `import warnings` to `retrieval.py`
+2. [x] Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
+3. [x] Add `retrieval_warnings: list[str] = field(default_factory=list)` to `RetrievalResponse`
+4. [x] Capture warnings in `retrieve()` and add to response
+5. [x] Add test: mock SQLite to raise `sqlite3.OperationalError`, verify warning is issued and partial results returned
+6. [x] Document placeholder results in `enrich_with_parent()` and `enrich_with_siblings()` with clear comments
 
 **Acceptance Criteria:**
-- [ ] SQLite errors produce `warnings.warn()` rather than silent pass
-- [ ] `RetrievalResponse` carries warning messages
-- [ ] Partial results still returned on degraded path
-- [ ] All tests pass
+- [x] SQLite errors produce `warnings.warn()` rather than silent pass
+- [x] `RetrievalResponse` carries warning messages
+- [x] Partial results still returned on degraded path
+- [x] All tests pass
 
 ---
 
@@ -219,16 +220,16 @@ Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are
 `detect_safety_callouts()` compiles patterns with flags at line 141 but then uses `re.search(sc.pattern, stripped)` (the raw string) at line 145 instead of the compiled `pat`. The inner loop at line 157 has the same issue.
 
 **Tasks:**
-1. [ ] Change `re.search(sc.pattern, stripped)` at line 145 to `pat.search(stripped)`
-2. [ ] Pre-compile inner loop patterns: build a list of compiled safety patterns before the line loop, and use them at line 157 instead of `re.search(sc2.pattern, next_stripped)`
-3. [ ] Add test: create a profile with a case-insensitive safety pattern (lowercase "warning"), verify it matches uppercase text
-4. [ ] Run full test suite
+1. [x] Change `re.search(sc.pattern, stripped)` at line 145 to `pat.search(stripped)`
+2. [x] Pre-compile inner loop patterns: build a list of compiled safety patterns before the line loop, and use them at line 157 instead of `re.search(sc2.pattern, next_stripped)`
+3. [x] Add test: create a profile with a case-insensitive safety pattern (lowercase "warning"), verify it matches uppercase text
+4. [x] Run full test suite
 
 **Acceptance Criteria:**
-- [ ] All pattern matching in `detect_safety_callouts()` uses compiled regex objects
-- [ ] No raw `re.search(sc.pattern, ...)` calls remain
-- [ ] Mixed-case test passes
-- [ ] All existing tests pass
+- [x] All pattern matching in `detect_safety_callouts()` uses compiled regex objects
+- [x] No raw `re.search(sc.pattern, ...)` calls remain
+- [x] Mixed-case test passes
+- [x] All existing tests pass
 
 ---
 
@@ -243,13 +244,13 @@ Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are
 `cmd_bootstrap_profile()` has a TODO comment and `return 0`. Should print an error and return 1.
 
 **Tasks:**
-1. [ ] Replace TODO block with: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
-2. [ ] Update test in `test_cli.py` that checks bootstrap-profile behavior to expect exit code 1
+1. [x] Replace TODO block with: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
+2. [x] Update test in `test_cli.py` that checks bootstrap-profile behavior to expect exit code 1
 
 **Acceptance Criteria:**
-- [ ] `pipeline bootstrap-profile` returns exit code 1
-- [ ] Error message clearly states the feature is not implemented
-- [ ] All tests pass
+- [x] `pipeline bootstrap-profile` returns exit code 1
+- [x] Error message clearly states the feature is not implemented
+- [x] All tests pass
 
 ---
 
@@ -264,35 +265,35 @@ Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are
 Replace `id=i` with deterministic UUID5 derived from `chunk_id`.
 
 **Tasks:**
-1. [ ] Add `import uuid` to `embeddings.py`
-2. [ ] Change `id=i` at line 131 to `id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
-3. [ ] Update tests that assert point IDs
-4. [ ] Add test: verify same chunk_id always produces same point ID
-5. [ ] Add test: verify different chunk_ids produce different point IDs
+1. [x] Add `import uuid` to `embeddings.py`
+2. [x] Change `id=i` at line 131 to `id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
+3. [x] Update tests that assert point IDs
+4. [x] Add test: verify same chunk_id always produces same point ID
+5. [x] Add test: verify different chunk_ids produce different point IDs
 
 **Acceptance Criteria:**
-- [ ] Point IDs are deterministic UUIDs derived from chunk_id
-- [ ] Re-indexing the same chunks produces the same point IDs (idempotent)
-- [ ] Different manuals don't collide
-- [ ] All tests pass
+- [x] Point IDs are deterministic UUIDs derived from chunk_id
+- [x] Re-indexing the same chunks produces the same point IDs (idempotent)
+- [x] Different manuals don't collide
+- [x] All tests pass
 
 ---
 
 ### Phase 2 Testing Requirements
 
-- [ ] HTTP timeout/retry behavior tested with mocks
-- [ ] SQLite error surfacing tested
-- [ ] Regex compilation verified with case-sensitivity test
-- [ ] Bootstrap-profile exit code tested
-- [ ] Deterministic ID generation tested
-- [ ] All 250+ existing tests pass
-- [ ] New tests added: ~10-12
+- [x] HTTP timeout/retry behavior tested with mocks
+- [x] SQLite error surfacing tested
+- [x] Regex compilation verified with case-sensitivity test
+- [x] Bootstrap-profile exit code tested
+- [x] Deterministic ID generation tested
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~10-12
 
 ### Phase 2 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing (`pytest -v --tb=short`)
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing (`pytest -v --tb=short`)
+- [x] No regressions introduced
 
 ---
 
@@ -323,18 +324,18 @@ Replace `id=i` with deterministic UUID5 derived from `chunk_id`.
 Add functions to serialize chunks to JSONL and deserialize them back. Each line is a JSON object with `chunk_id`, `manual_id`, `text`, and `metadata`. Add `--output-dir` flag to `pipeline process`.
 
 **Tasks:**
-1. [ ] Add `save_chunks(chunks: list[Chunk], output_path: Path) -> None` — writes one JSON line per chunk
-2. [ ] Add `load_chunks(input_path: Path) -> list[Chunk]` — reads JSONL back into Chunk objects
-3. [ ] Add round-trip test: save chunks, load them back, verify equality
-4. [ ] Add `--output-dir` flag to `process` subcommand in `build_parser()`
-5. [ ] Update `cmd_process()` to write `{manual_id}_chunks.jsonl` when `--output-dir` is provided
-6. [ ] Add test for CLI output flag
+1. [x] Add `save_chunks(chunks: list[Chunk], output_path: Path) -> None` — writes one JSON line per chunk
+2. [x] Add `load_chunks(input_path: Path) -> list[Chunk]` — reads JSONL back into Chunk objects
+3. [x] Add round-trip test: save chunks, load them back, verify equality
+4. [x] Add `--output-dir` flag to `process` subcommand in `build_parser()`
+5. [x] Update `cmd_process()` to write `{manual_id}_chunks.jsonl` when `--output-dir` is provided
+6. [x] Add test for CLI output flag
 
 **Acceptance Criteria:**
-- [ ] `save_chunks` produces valid JSONL
-- [ ] `load_chunks` round-trips perfectly (identical Chunk objects)
-- [ ] `pipeline process --output-dir ./out` writes chunks file
-- [ ] All tests pass
+- [x] `save_chunks` produces valid JSONL
+- [x] `load_chunks` round-trips perfectly (identical Chunk objects)
+- [x] `pipeline process --output-dir ./out` writes chunks file
+- [x] All tests pass
 
 ---
 
@@ -350,15 +351,15 @@ Add functions to serialize chunks to JSONL and deserialize them back. Each line 
 Add manifest serialization to JSON (not JSONL — manifest is a single hierarchical document). Write alongside chunks in `pipeline process --output-dir`.
 
 **Tasks:**
-1. [ ] Add `save_manifest(manifest: Manifest, output_path: Path) -> None`
-2. [ ] Add `load_manifest(input_path: Path) -> Manifest`
-3. [ ] Add round-trip test
-4. [ ] Update `cmd_process()` to write `{manual_id}_manifest.json`
+1. [x] Add `save_manifest(manifest: Manifest, output_path: Path) -> None`
+2. [x] Add `load_manifest(input_path: Path) -> Manifest`
+3. [x] Add round-trip test
+4. [x] Update `cmd_process()` to write `{manual_id}_manifest.json`
 
 **Acceptance Criteria:**
-- [ ] Manifest serializes to readable JSON
-- [ ] Round-trip preserves all fields
-- [ ] All tests pass
+- [x] Manifest serializes to readable JSON
+- [x] Round-trip preserves all fields
+- [x] All tests pass
 
 ---
 
@@ -373,17 +374,17 @@ Add manifest serialization to JSON (not JSONL — manifest is a single hierarchi
 Add `--chunks` and `--profile` flags to `pipeline qa`. Load chunks from JSONL, load profile from YAML, run `run_validation_suite()`. No Qdrant needed.
 
 **Tasks:**
-1. [ ] Update `qa` subcommand in `build_parser()`: add `--chunks` (required), `--profile` (required), make `--manual-id` and `--test-set` optional
-2. [ ] Rewrite `cmd_qa()`: if `--chunks` provided, load from JSONL and run offline validation
-3. [ ] Print validation report to stdout (same format as `cmd_validate()`)
-4. [ ] Add test: create temp JSONL, run offline QA, verify report
-5. [ ] Keep existing Qdrant-required path as a future option
+1. [x] Update `qa` subcommand in `build_parser()`: add `--chunks` (required), `--profile` (required), make `--manual-id` and `--test-set` optional
+2. [x] Rewrite `cmd_qa()`: if `--chunks` provided, load from JSONL and run offline validation
+3. [x] Print validation report to stdout (same format as `cmd_validate()`)
+4. [x] Add test: create temp JSONL, run offline QA, verify report
+5. [x] Keep existing Qdrant-required path as a future option
 
 **Acceptance Criteria:**
-- [ ] `pipeline qa --chunks chunks.jsonl --profile profile.yaml` runs validation offline
-- [ ] All 7 QA checks run on loaded chunks
-- [ ] Exit code 0 on pass, 1 on failure
-- [ ] All tests pass
+- [x] `pipeline qa --chunks chunks.jsonl --profile profile.yaml` runs validation offline
+- [x] All 7 QA checks run on loaded chunks
+- [x] Exit code 0 on pass, 1 on failure
+- [x] All tests pass
 
 ---
 
@@ -402,38 +403,38 @@ R5: For each chunk, detect tables via `detect_tables()`. If a table spans a chun
 R8: If a chunk starts with a figure reference line (matches `figure_pattern`) and the previous chunk's content references the same figure, merge the figure reference into the previous chunk.
 
 **Tasks:**
-1. [ ] Implement R5: iterate chunks, detect tables within each, if a table's last line is the chunk's last line AND the next chunk starts with table-like content, merge
-2. [ ] Implement R8: iterate chunks, if chunk starts with figure reference, check if previous chunk contains text referencing that figure — if so, merge
-3. [ ] Add test for R5: create chunks where a table is split across two chunks, verify they get merged
-4. [ ] Add test for R8: create chunks where a figure ref is separated from its context, verify merge
-5. [ ] Run full test suite — existing pass-through behavior tests should still pass (rules were no-ops, so inputs that don't trigger the rules should produce identical output)
+1. [x] Implement R5: iterate chunks, detect tables within each, if a table's last line is the chunk's last line AND the next chunk starts with table-like content, merge
+2. [x] Implement R8: iterate chunks, if chunk starts with figure reference, check if previous chunk contains text referencing that figure — if so, merge
+3. [x] Add test for R5: create chunks where a table is split across two chunks, verify they get merged
+4. [x] Add test for R8: create chunks where a figure ref is separated from its context, verify merge
+5. [x] Run full test suite — existing pass-through behavior tests should still pass (rules were no-ops, so inputs that don't trigger the rules should produce identical output)
 
 **Acceptance Criteria:**
-- [ ] R5 detects and re-merges split tables
-- [ ] R8 detects and re-attaches orphaned figure references
-- [ ] Existing tests still pass (rules were no-ops, so non-triggering inputs are unchanged)
-- [ ] New tests verify merge behavior
-- [ ] All tests pass
+- [x] R5 detects and re-merges split tables
+- [x] R8 detects and re-attaches orphaned figure references
+- [x] Existing tests still pass (rules were no-ops, so non-triggering inputs are unchanged)
+- [x] New tests verify merge behavior
+- [x] All tests pass
 
 ---
 
 ### Phase 3 Testing Requirements
 
-- [ ] JSONL round-trip for chunks (save/load identity)
-- [ ] JSON round-trip for manifest
-- [ ] Offline QA produces correct validation report
-- [ ] R5 merges split tables
-- [ ] R8 merges orphaned figure references
-- [ ] CLI `--output-dir` writes expected files
-- [ ] All 250+ existing tests pass
-- [ ] New tests added: ~15-20
+- [x] JSONL round-trip for chunks (save/load identity)
+- [x] JSON round-trip for manifest
+- [x] Offline QA produces correct validation report
+- [x] R5 merges split tables
+- [x] R8 merges orphaned figure references
+- [x] CLI `--output-dir` writes expected files
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~15-20
 
 ### Phase 3 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing
-- [ ] `CLAUDE.md` updated with new CLI flags and persistence functions
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing
+- [x] `CLAUDE.md` updated with new CLI flags and persistence functions
+- [x] No regressions introduced
 
 ---
 
@@ -467,19 +468,19 @@ R8: If a chunk starts with a figure reference line (matches `figure_pattern`) an
 Add Python `logging` to every pipeline module. Configure via CLI flags. Replace `print()` calls with `logger.info()`.
 
 **Tasks:**
-1. [ ] Add `import logging` and `logger = logging.getLogger(__name__)` to each source module
-2. [ ] Replace all `print()` calls in `cli.py` with `logger.info()` / `logger.error()`
-3. [ ] Add `--verbose` flag (sets DEBUG) and `--quiet` flag (sets WARNING) to CLI
-4. [ ] Configure root logger in `main()` based on flags
-5. [ ] Add `logger.debug()` calls at key decision points: boundary detection, rule application, embedding generation
-6. [ ] Update CLI tests to capture log output instead of stdout
+1. [x] Add `import logging` and `logger = logging.getLogger(__name__)` to each source module
+2. [x] Replace all `print()` calls in `cli.py` with `logger.info()` / `logger.error()`
+3. [x] Add `--verbose` flag (sets DEBUG) and `--quiet` flag (sets WARNING) to CLI
+4. [x] Configure root logger in `main()` based on flags
+5. [x] Add `logger.debug()` calls at key decision points: boundary detection, rule application, embedding generation
+6. [x] Update CLI tests to capture log output instead of stdout
 
 **Acceptance Criteria:**
-- [ ] All modules use `logging` instead of `print()`
-- [ ] `--verbose` shows debug-level output
-- [ ] Default shows info-level output
-- [ ] `--quiet` suppresses info
-- [ ] All tests pass
+- [x] All modules use `logging` instead of `print()`
+- [x] `--verbose` shows debug-level output
+- [x] Default shows info-level output
+- [x] `--quiet` suppresses info
+- [x] All tests pass
 
 ---
 
@@ -497,18 +498,18 @@ Add Python `logging` to every pipeline module. Configure via CLI flags. Replace 
 Replace `page_range: dict[str, str]` and `line_range: dict[str, int]` with typed dataclasses.
 
 **Tasks:**
-1. [ ] Define `PageRange` and `LineRange` dataclasses in `structural_parser.py`
-2. [ ] Update `ManifestEntry` fields
-3. [ ] Update `build_manifest()` to construct typed ranges
-4. [ ] Search for `.get("start"` and `.get("end"` — update to `.start` / `.end`
-5. [ ] Update test fixtures and assertions
-6. [ ] Run full test suite
+1. [x] Define `PageRange` and `LineRange` dataclasses in `structural_parser.py`
+2. [x] Update `ManifestEntry` fields
+3. [x] Update `build_manifest()` to construct typed ranges
+4. [x] Search for `.get("start"` and `.get("end"` — update to `.start` / `.end`
+5. [x] Update test fixtures and assertions
+6. [x] Run full test suite
 
 **Acceptance Criteria:**
-- [ ] No dict-style access on range fields
-- [ ] `entry.line_range.start` / `entry.line_range.end` work correctly
-- [ ] `entry.page_range.start` / `entry.page_range.end` work correctly
-- [ ] All tests pass
+- [x] No dict-style access on range fields
+- [x] `entry.line_range.start` / `entry.line_range.end` work correctly
+- [x] `entry.page_range.start` / `entry.page_range.end` work correctly
+- [x] All tests pass
 
 ---
 
@@ -526,19 +527,19 @@ Current test fixtures are all single-page. The cross-page slicing bug (fixed in 
 Note: Phase 1 (item 1.1) adds a minimal multi-page test to catch the coordinate bug. This work item adds comprehensive multi-page coverage: multiple boundaries per page, cross-page sections, edge cases (boundary on first/last line of a page).
 
 **Tasks:**
-1. [ ] Create `xj_multipage_fixture` — 3 pages with Group, Section, Procedure boundaries spanning pages
-2. [ ] Create `tm9_multipage_fixture` — 2 pages with Chapter and Section boundaries
-3. [ ] Write tests: detect boundaries across pages, verify global line numbers
-4. [ ] Write tests: build manifest from multi-page boundaries, verify chunk_ids and line_ranges
-5. [ ] Write tests: assemble chunks from multi-page manifest, verify text extraction
-6. [ ] Write edge case test: boundary on first line of page 2
+1. [x] Create `xj_multipage_fixture` — 3 pages with Group, Section, Procedure boundaries spanning pages
+2. [x] Create `tm9_multipage_fixture` — 2 pages with Chapter and Section boundaries
+3. [x] Write tests: detect boundaries across pages, verify global line numbers
+4. [x] Write tests: build manifest from multi-page boundaries, verify chunk_ids and line_ranges
+5. [x] Write tests: assemble chunks from multi-page manifest, verify text extraction
+6. [x] Write edge case test: boundary on first line of page 2
 
 **Acceptance Criteria:**
-- [ ] At least 2 multi-page fixtures covering different profile types
-- [ ] Boundary detection correctly handles page transitions
-- [ ] Manifest line_range values are global offsets
-- [ ] Chunk text extraction is correct for boundaries on any page
-- [ ] All tests pass
+- [x] At least 2 multi-page fixtures covering different profile types
+- [x] Boundary detection correctly handles page transitions
+- [x] Manifest line_range values are global offsets
+- [x] Chunk text extraction is correct for boundaries on any page
+- [x] All tests pass
 
 ---
 
@@ -553,33 +554,33 @@ Note: Phase 1 (item 1.1) adds a minimal multi-page test to catch the coordinate 
 Add mypy to the project for static type checking. Start with permissive settings and fix any immediate errors.
 
 **Tasks:**
-1. [ ] Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
-2. [ ] Add `[tool.mypy]` section to `pyproject.toml` with `python_version = "3.10"`, `warn_return_any = true`, `warn_unused_configs = true`
-3. [ ] Run `mypy src/pipeline/` and fix any type errors
-4. [ ] Document mypy invocation in CLAUDE.md Quick Reference
+1. [x] Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
+2. [x] Add `[tool.mypy]` section to `pyproject.toml` with `python_version = "3.10"`, `warn_return_any = true`, `warn_unused_configs = true`
+3. [x] Run `mypy src/pipeline/` and fix any type errors
+4. [x] Document mypy invocation in CLAUDE.md Quick Reference
 
 **Acceptance Criteria:**
-- [ ] `mypy src/pipeline/` passes (possibly with some `# type: ignore` for Qdrant client)
-- [ ] Dev install includes mypy
-- [ ] All tests still pass
+- [x] `mypy src/pipeline/` passes (possibly with some `# type: ignore` for Qdrant client)
+- [x] Dev install includes mypy
+- [x] All tests still pass
 
 ---
 
 ### Phase 4 Testing Requirements
 
-- [ ] Logging output captured and verified in CLI tests
-- [ ] Typed ranges pass all existing tests
-- [ ] Multi-page tests cover page transitions and edge cases
-- [ ] mypy passes on all source modules
-- [ ] All 250+ existing tests pass
-- [ ] New tests added: ~15-20
+- [x] Logging output captured and verified in CLI tests
+- [x] Typed ranges pass all existing tests
+- [x] Multi-page tests cover page transitions and edge cases
+- [x] mypy passes on all source modules
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~15-20
 
 ### Phase 4 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing
-- [ ] CLAUDE.md updated (Quick Reference, Key Data Types)
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing
+- [x] CLAUDE.md updated (Quick Reference, Key Data Types)
+- [x] No regressions introduced
 
 ---
 
@@ -621,19 +622,19 @@ Within phases, work items can often run in parallel:
 
 ---
 
-## Success Metrics
+## Success Metrics (All Met - 2026-02-16)
 
-- [ ] Cross-page chunk extraction produces correct text for the 7 real PDFs in `data/`
-- [ ] No QA false positives from metadata contract mismatch
-- [ ] Embedding input includes hierarchical context for every chunk
-- [ ] `bootstrap-profile` returns error (not silent success)
-- [ ] HTTP timeout prevents hanging on Ollama failure
-- [ ] Retrieval failures are visible (warnings, not silent)
-- [ ] Chunks persist to JSONL and round-trip correctly
-- [ ] Offline QA works without external services
-- [ ] R5 and R8 are functional (not no-ops)
-- [ ] All 250+ tests pass at every phase boundary
-- [ ] mypy passes on source modules
+- [x] Cross-page chunk extraction produces correct text for the 7 real PDFs in `data/`
+- [x] No QA false positives from metadata contract mismatch
+- [x] Embedding input includes hierarchical context for every chunk
+- [x] `bootstrap-profile` returns error (not silent success)
+- [x] HTTP timeout prevents hanging on Ollama failure
+- [x] Retrieval failures are visible (warnings, not silent)
+- [x] Chunks persist to JSONL and round-trip correctly
+- [x] Offline QA works without external services
+- [x] R5 and R8 are functional (not no-ops)
+- [x] All 250+ tests pass at every phase boundary
+- [x] mypy passes on source modules
 
 ---
 
@@ -660,4 +661,5 @@ Within phases, work items can often run in parallel:
 ---
 
 *Implementation plan generated by Claude on 2026-02-16*
+*All phases completed on 2026-02-16 — 349 tests passing*
 *Source: RECOMMENDATIONS.md + REVIEW.md architectural audit*
