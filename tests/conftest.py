@@ -219,6 +219,44 @@ Refer to Group 19 for steering procedures.
 
 
 @pytest.fixture
+def xj_multipage_pages() -> list[str]:
+    """Two-page XJ manual content with boundaries on each page.
+
+    Page 0 has a group boundary ('0 Lubrication and Maintenance') at line 0
+    and a section boundary ('SERVICE PROCEDURES') at line 4.
+    Page 1 has a procedure boundary ('JUMP STARTING PROCEDURE') at line 2.
+
+    Used to verify that detect_boundaries records global line offsets
+    rather than per-page offsets, so that assemble_chunks extracts the
+    correct text from the concatenated page stream.
+    """
+    page0 = (
+        "0 Lubrication and Maintenance\n"
+        "\n"
+        "Introduction to maintenance procedures for all models.\n"
+        "\n"
+        "SERVICE PROCEDURES\n"
+        "\n"
+        "Overview of service procedures follows."
+    )
+    page1 = (
+        "Additional overview text from page 2.\n"
+        "\n"
+        "JUMP STARTING PROCEDURE\n"
+        "\n"
+        "WARNING: REVIEW COMPLETE JUMP STARTING PROCEDURE BEFORE\n"
+        "PROCEEDING. IMPROPER PROCEDURE COULD RESULT IN PERSONAL\n"
+        "INJURY OR PROPERTY DAMAGE FROM BATTERY EXPLOSION.\n"
+        "\n"
+        "(1) Connect positive cable to booster battery.\n"
+        "(2) Connect other end to discharged battery positive.\n"
+        "(3) Connect negative cable to booster battery.\n"
+        "(4) Connect other negative end to engine ground."
+    )
+    return [page0, page1]
+
+
+@pytest.fixture
 def sample_manifest_entry() -> dict:
     """A sample manifest entry dict for chunk assembly testing."""
     return {

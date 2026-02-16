@@ -118,12 +118,58 @@ class TestDetectBoundaries:
         if boundaries:
             assert boundaries[0].page_number == 1
 
-    def test_records_line_number(self, xj_profile_path):
+    def test_records_line_number_as_global_offset(self, xj_profile_path):
+        """line_number must be a global offset into the concatenated page stream."""
         profile = load_profile(xj_profile_path)
         pages = ["Some preceding text\n\n0 Lubrication and Maintenance\nContent"]
         boundaries = detect_boundaries(pages, profile)
         if boundaries:
-            assert boundaries[0].line_number >= 0
+            # "0 Lubrication..." is on line index 2 within page 0 (and globally)
+            assert boundaries[0].line_number == 2
+
+    def test_multipage_line_numbers_are_global(
+        self, xj_profile_path, xj_multipage_pages
+    ):
+        """Boundaries on page 2+ must have global (absolute) line offsets.
+
+        Page 0 has 7 lines (indices 0-6). Page 1 has 12 lines (indices 0-11).
+        After concatenation, page 1's lines start at global index 7.
+        The procedure boundary 'JUMP STARTING PROCEDURE' is at page-local
+        line 2, so its global offset must be 7 + 2 = 9.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(xj_multipage_pages, profile)
+
+        # Should detect at least: group on page 0, section on page 0,
+        # procedure on page 1
+        assert len(boundaries) >= 3
+
+        proc_bounds = [b for b in boundaries if b.level == 3]
+        assert len(proc_bounds) >= 1, "Must detect procedure boundary on page 1"
+
+        # The procedure is at page-local line 2 of page 1.
+        # Page 0 has 7 lines, so global offset = 7 + 2 = 9.
+        proc = proc_bounds[0]
+        assert proc.page_number == 1
+        page0_line_count = len(xj_multipage_pages[0].split("\n"))
+        expected_global = page0_line_count + 2  # 7 + 2 = 9
+        assert proc.line_number == expected_global, (
+            f"Expected global line {expected_global}, got {proc.line_number}. "
+            f"line_number must be a global offset, not per-page."
+        )
+
+    def test_multipage_group_boundary_on_first_page(
+        self, xj_profile_path, xj_multipage_pages
+    ):
+        """Group boundary on page 0 should have line_number == 0 (global == local)."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(xj_multipage_pages, profile)
+
+        group_bounds = [b for b in boundaries if b.level == 1]
+        assert len(group_bounds) >= 1
+        assert group_bounds[0].line_number == 0, (
+            "Group boundary on page 0, line 0 should have global offset 0"
+        )
 
     def test_empty_pages_returns_empty(self, xj_profile_path):
         profile = load_profile(xj_profile_path)

@@ -76,6 +76,12 @@ def detect_boundaries(
     # level that is deeper than any already-open level of the same pattern.
     current_level = 0  # deepest hierarchy level currently active
 
+    # Running offset so that line_number is a global (absolute) index into the
+    # concatenated page stream (i.e. "\n".join(pages).split("\n")).  Without
+    # this, assemble_chunks() — which joins all pages and indexes by
+    # line_number — would extract the wrong text for page 2+.
+    global_line_offset = 0
+
     for page_idx, page_text in enumerate(pages):
         lines = page_text.split("\n")
         for line_idx, line in enumerate(lines):
@@ -125,9 +131,12 @@ def detect_boundaries(
                     id=boundary_id,
                     title=boundary_title,
                     page_number=page_idx,
-                    line_number=line_idx,
+                    line_number=global_line_offset + line_idx,
                 )
             )
+
+        # Advance the global offset by the number of lines in this page
+        global_line_offset += len(lines)
 
     # Sort by page_number, then line_number
     boundaries.sort(key=lambda b: (b.page_number, b.line_number))
