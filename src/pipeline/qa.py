@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from difflib import SequenceMatcher
+
 from typing import Any
 
 from .chunk_assembly import Chunk, count_tokens
@@ -191,6 +191,10 @@ def check_duplicate_content(
     issues: list[ValidationIssue] = []
     seen_pairs: set[tuple[str, str]] = set()
 
+    # Pre-tokenize all chunks once
+    token_sets = [set(c.text.split()) for c in chunks]
+    token_counts = [len(c.text.split()) for c in chunks]
+
     for i in range(len(chunks)):
         for j in range(i + 1, len(chunks)):
             chunk_a = chunks[i]
@@ -205,12 +209,17 @@ def check_duplicate_content(
                 continue
             seen_pairs.add(pair_key)
 
-            # Use SequenceMatcher on token sequences for similarity
-            tokens_a = chunk_a.text.split()
-            tokens_b = chunk_b.text.split()
-            ratio = SequenceMatcher(
-                None, tokens_a, tokens_b
-            ).ratio()
+            # Quick length check — skip if token counts differ by more than
+            # what the threshold allows (avoids expensive set operations)
+            min_count = min(token_counts[i], token_counts[j])
+            max_count = max(token_counts[i], token_counts[j])
+            if max_count > 0 and min_count / max_count < similarity_threshold:
+                continue
+
+            # Jaccard similarity on token sets
+            intersection = len(token_sets[i] & token_sets[j])
+            union = len(token_sets[i] | token_sets[j])
+            ratio = intersection / union if union > 0 else 0.0
 
             if ratio >= similarity_threshold:
                 issues.append(

@@ -29,7 +29,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not integration'"
 markers = [
     "unit: Unit tests (no external dependencies)",
     "integration: Integration tests (require external services)",
