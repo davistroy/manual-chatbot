@@ -4,7 +4,7 @@
 
 Smart Chunking Pipeline for Vehicle Service Manual RAG. Processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot.
 
-**Current state**: Fully implemented — all 250 tests pass. The codebase was built TDD-style: tests were written first as the specification, then all source functions were implemented. Profile schema is versioned (v1.0) with typed dataclasses and expanded validation.
+**Current state**: Fully implemented — all 349 tests pass. Built TDD-style, then hardened through architectural review remediation (15 work items). Profile schema is versioned (v1.0) with typed dataclasses and expanded validation. All pipeline modules use structured logging.
 
 ## Quick Reference
 
@@ -30,15 +30,15 @@ schema/                # JSON Schema for profile YAML format
   manual_profile_v1.schema.json
 src/pipeline/          # All source code
   profile.py           # YAML profile loading, validation, pattern compilation
-  structural_parser.py # Boundary detection, manifest building
+  structural_parser.py # Boundary detection, manifest building, JSON persistence
   ocr_cleanup.py       # OCR cleanup (substitutions, headers, garbage, unicode)
-  chunk_assembly.py    # Chunk rules R1-R8, vehicle tagging
+  chunk_assembly.py    # Chunk rules R1-R8, vehicle tagging, JSONL persistence
   embeddings.py        # Embedding composition, Qdrant + SQLite indexing
   retrieval.py         # Query analysis, retrieval pipeline
   qa.py                # 7-check validation suite
-  cli.py               # CLI entry point (process, bootstrap-profile, validate, qa)
+  cli.py               # CLI entry point (process, bootstrap-profile, validate, validate-chunks, qa)
 
-tests/                 # Test suite (250 tests)
+tests/                 # Test suite (349 tests)
   conftest.py          # Shared fixtures — profile paths, sample texts, chunk helpers
   fixtures/            # YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid)
   test_*.py            # One test file per source module
@@ -61,6 +61,7 @@ Four-stage pipeline, each driven by a YAML manual profile:
 - `ContentTypeConfig` (profile.py) — Content type metadata (maintenance_schedule, wiring_diagrams, specification_tables)
 - `VariantConfig` (profile.py) — Market variant configuration (has_market_variants, variant_indicator, markets)
 - `Boundary` (structural_parser.py) — Detected structural boundary with level, ID, title, page/line
+- `PageRange` / `LineRange` (structural_parser.py) — Typed range dataclasses for manifest entries
 - `Manifest` / `ManifestEntry` (structural_parser.py) — Hierarchical document map with chunk boundaries
 - `CleanedPage` (ocr_cleanup.py) — Cleaned page with original text, cleaned text, garbage lines, substitution count
 - `Chunk` (chunk_assembly.py) — Final chunk with text, metadata dict, chunk_id, manual_id

@@ -24,7 +24,7 @@ This pipeline processes PDF service manuals from different manufacturers, eras, 
 
 ## Current Status
 
-All pipeline components are **fully implemented** and passing the complete test suite (250/250 tests). The codebase was developed using TDD — the 229 tests were written first to define expected behavior, then all source functions were implemented to satisfy them.
+All pipeline components are **fully implemented** and passing the complete test suite (**349 tests**). The codebase was developed using TDD, then hardened through an architectural review remediation that added persistence, structured logging, typed range fields, and comprehensive multi-page test coverage.
 
 ## Project Structure
 
@@ -32,19 +32,21 @@ All pipeline components are **fully implemented** and passing the complete test 
 manual-chatbot/
   pyproject.toml              # Package config, dependencies, pytest settings
   PRD.pdf                     # Detailed product requirements document (30 pages)
-  IMPLEMENTATION_PLAN.md      # Implementation plan with work items
+  IMPLEMENTATION_PLAN.md      # Completed remediation plan (15 work items)
   PROGRESS.md                 # Implementation progress log
   LEARNINGS.md                # Issues encountered and solutions discovered
+  RECOMMENDATIONS.md          # Improvement recommendations from architectural review
+  REVIEW.md                   # Architectural review findings
   schema/
     manual_profile_v1.schema.json  # JSON Schema for YAML profiles
   src/
     pipeline/
       __init__.py
-      cli.py                  # CLI: process, bootstrap-profile, validate, qa
+      cli.py                  # CLI: process, bootstrap-profile, validate, validate-chunks, qa
       profile.py              # YAML profile loader, validator, pattern compiler
-      structural_parser.py    # Boundary detection, manifest building, chunk IDs
+      structural_parser.py    # Boundary detection, manifest building, persistence
       ocr_cleanup.py          # OCR substitutions, header stripping, garbage detection
-      chunk_assembly.py       # Chunk rules R1-R8, vehicle tagging, metadata
+      chunk_assembly.py       # Chunk rules R1-R8, vehicle tagging, persistence
       embeddings.py           # Embedding composition, Qdrant/SQLite indexing
       retrieval.py            # Query analysis, retrieval pipeline, reranking
       qa.py                   # Chunk validation suite (7 checks)
@@ -133,18 +135,26 @@ pytest -m unit
 ## CLI Usage
 
 ```bash
-# Process a single manual
+# Process a single manual (extract, parse, chunk)
 pipeline process --profile profiles/xj-1999.yaml --pdf data/xj-manual.pdf
 
-# Bootstrap a profile from a new manual PDF
-pipeline bootstrap-profile --pdf data/new-manual.pdf --output profiles/new.yaml
+# Process and save chunks to JSONL
+pipeline process --profile profiles/xj-1999.yaml --pdf data/xj-manual.pdf --output-dir output/
 
 # Validate a profile against its PDF
 pipeline validate --profile profiles/xj-1999.yaml --pdf data/xj-manual.pdf
 
-# Run QA checks on an indexed manual
+# Run offline QA on saved chunks (no Qdrant needed)
+pipeline validate-chunks --chunks output/xj-1999_chunks.jsonl --profile profiles/xj-1999.yaml
+
+# Bootstrap a profile from a new manual PDF (not yet implemented)
+pipeline bootstrap-profile --pdf data/new-manual.pdf --output profiles/new.yaml
+
+# Run QA checks on an indexed manual (requires Qdrant)
 pipeline qa --manual-id xj-1999 --test-set tests/xj-queries.json
 ```
+
+Global flags: `--verbose`/`-v` (debug output), `--quiet`/`-q` (warnings only).
 
 ## Dependencies
 
