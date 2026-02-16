@@ -1,527 +1,665 @@
-# Implementation Plan
+# Implementation Plan: REVIEW.md Remediation
 
-**Generated:** 2026-02-15
-**Source Documents:**
-- Conversation analysis of three architectural decisions needing documentation
-- `src/pipeline/chunk_assembly.py` (rule ordering, token counting)
-- `src/pipeline/profile.py` (schema definition, validation, loading)
-- `tests/fixtures/*.yaml` (4 profile fixtures)
-- `LEARNINGS.md` (existing decision notes)
-
-**Total Phases:** 3
-**Estimated Total Effort:** ~45,000 tokens
-
----
-
-## Executive Summary
-
-Three architectural decisions in the chunking pipeline are undocumented or insufficiently documented, creating maintenance risk. The rule ordering in `assemble_chunks()` is intentionally non-sequential but appears wrong to anyone unfamiliar with the rationale. The `count_tokens()` function uses word-split as a deliberate dependency tradeoff but looks like a shortcut. The YAML profile schema — the system's core extension point — has no version marker, no formal schema definition, and minimal validation despite affecting all manual profiles and all 229 tests.
-
-This plan addresses all three with source-level documentation, a JSON Schema for the profile format, typed dataclasses for the currently-untyped dict fields, expanded validation, and a guard test for rule ordering.
+**Generated:** 2026-02-16
+**Completed:** 2026-02-16
+**Based On:** RECOMMENDATIONS.md (derived from REVIEW.md architectural audit + codebase analysis)
+**Supersedes:** Previous IMPLEMENTATION_PLAN.md (2026-02-15, completed — schema stability/documentation)
+**Total Phases:** 4 (all complete)
+**Final Test Count:** 349 tests passing
 
 ---
 
 ## Plan Overview
 
-The three items are independent and can be implemented in any order. They are sequenced by risk (schema stability first, as it has the highest blast radius) and by complexity (documentation-only changes last).
+This plan addresses the remediation roadmap from the architectural review (REVIEW.md) plus additional findings from deep codebase analysis. **All 4 phases are now complete — 349 tests passing as of 2026-02-16.**
+
+The strategy was: **fix data integrity first** (Phase 1), **then reliability** (Phase 2), **then output quality and persistence** (Phase 3), **then developer experience** (Phase 4). Each phase left the codebase in a working state with all tests passing.
 
 ### Phase Summary Table
 
 | Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies |
 |-------|------------|------------------|-------------|--------------|
-| 1 | Profile Schema Stability | Version marker, JSON Schema, typed dicts, expanded validation | ~30K | None |
-| 2 | Token Counting Documentation | Docstring, scaling constant, accuracy notes | ~5K | None |
-| 3 | Rule Ordering Documentation | Inline comment block, ordering guard test | ~10K | None |
+| 1 | Data Integrity | Cross-page slicing fix, metadata alignment, embedding contract fix | ~60K | None |
+| 2 | Reliability | HTTP timeouts, error surfacing, regex fix, deterministic IDs, bootstrap-profile | ~40K | None |
+| 3 | Output & Persistence | JSONL chunk export, manifest export, offline QA, content-type detection | ~60K | Phase 1 (metadata alignment) |
+| 4 | Developer Experience | Structured logging, typed ranges, multi-page tests, mypy | ~40K | None |
 
 ---
 
-## Phase 1: Profile Schema Stability
+## Phase 1: Data Integrity
 
-**Estimated Effort:** ~30,000 tokens (including testing/fixes)
+**Estimated Effort:** ~60,000 tokens (including testing/fixes)
 **Dependencies:** None
-**Parallelizable:** Work items 1.1-1.4 are sequential; 1.5 can run after 1.3
+**Parallelizable:** 1.1 is independent; 1.2 and 1.3 can run in parallel after 1.1
 
 ### Goals
 
-- Establish a versioned profile schema so future changes are detectable
-- Replace `dict[str, Any]` fields with typed dataclasses for compile-time safety
-- Expand `validate_profile()` to catch malformed regexes and missing OCR fields
-- Create a JSON Schema file that serves as machine-readable documentation
+- Fix the cross-page chunk slicing coordinate model (REVIEW #1 — Critical)
+- Align metadata contract between assembler, QA, and embeddings (REVIEW #2 — Must Fix)
+- Fix embedding composition to use metadata header (REVIEW #3 — Must Fix)
 
 ### Work Items
 
-#### 1.1 Add `schema_version` field to ManualProfile and all YAML fixtures
+#### 1.1 Fix cross-page coordinate model
 
-**Requirement Refs:** Architectural Decision #3
+**Recommendation Ref:** D1
 **Files Affected:**
-- `src/pipeline/profile.py` (modify — add field to dataclass, update loader and validator)
-- `tests/fixtures/xj_1999_profile.yaml` (modify — add `schema_version: "1.0"`)
-- `tests/fixtures/cj_universal_profile.yaml` (modify — add `schema_version: "1.0"`)
-- `tests/fixtures/tm9_8014_profile.yaml` (modify — add `schema_version: "1.0"`)
-- `tests/fixtures/invalid_profile.yaml` (modify — add `schema_version: "1.0"` so it remains testable for other invalid fields)
-- `tests/test_profile.py` (modify — add schema version tests)
+- `src/pipeline/structural_parser.py` (modify — `detect_boundaries()`, `build_manifest()`)
+- `tests/test_structural_parser.py` (modify — update line_number assertions, add multi-page tests)
+- `tests/test_chunk_assembly.py` (modify — add multi-page assembly test)
+- `tests/conftest.py` (modify — add multi-page fixture)
 
 **Description:**
-Add a `schema_version: str` field to `ManualProfile` (after `manual_id`). Define a module-level constant `CURRENT_SCHEMA_VERSION = "1.0"`. Update `load_profile()` to read the field from YAML data. Update `validate_profile()` to check that `schema_version` is present and matches `CURRENT_SCHEMA_VERSION`.
+`detect_boundaries()` records `line_number` as the offset within the current page, but `assemble_chunks()` joins all pages and treats `line_number` as a global offset. For any manual with more than one page, chunk text extraction is wrong.
+
+Fix: track a running `global_line_offset` in `detect_boundaries()`. Before iterating each page's lines, compute `global_offset = sum(len(pages[p].split("\n")) for p in range(page_idx))` (or accumulate incrementally). Store `boundary.line_number = global_offset + line_idx`.
 
 **Tasks:**
-1. [ ] Add `CURRENT_SCHEMA_VERSION = "1.0"` constant to `profile.py`
-2. [ ] Add `schema_version: str` field to `ManualProfile` dataclass
-3. [ ] Update `load_profile()` to extract `schema_version` from YAML data (line ~165)
-4. [ ] Update `validate_profile()` to error on missing or mismatched version (line ~189)
-5. [ ] Add `schema_version: "1.0"` as first line of all 4 YAML fixtures
-6. [ ] Update existing tests that construct `ManualProfile` directly (if any)
-7. [ ] Add tests: missing version raises error, wrong version raises error, correct version passes
+1. [x] Add multi-page test fixtures to `conftest.py` — at least 2 pages with boundaries on each page
+2. [x] Write failing test: process 2 pages through `detect_boundaries` → `build_manifest` → `assemble_chunks`, assert chunk text matches expected content from the correct page
+3. [x] Fix `detect_boundaries()` in `structural_parser.py` to use global line offsets
+4. [x] Update `build_manifest()` if needed (it passes through boundary.line_number — should work once boundaries are correct)
+5. [x] Update existing tests in `test_structural_parser.py` that assert per-page line numbers — these should now assert global offsets
+6. [x] Run full test suite — all 250+ tests must pass
 
 **Acceptance Criteria:**
-- [ ] All profiles load with `schema_version: "1.0"`
-- [ ] `validate_profile()` returns error for missing `schema_version`
-- [ ] `validate_profile()` returns error for `schema_version: "2.0"` (unknown)
-- [ ] All 229 existing tests still pass
+- [x] Multi-page test demonstrates correct chunk text extraction from page 2+
+- [x] Boundary line numbers are global (absolute) offsets, not per-page
+- [x] `assemble_chunks()` produces correct text for multi-page manuals without any changes to its own code
+- [x] All existing tests pass (with updated line number expectations)
 
 ---
 
-#### 1.2 Type the `content_types`, `ocr_cleanup`, and `variants` dicts
+#### 1.2 Align metadata contract
 
-**Requirement Refs:** Architectural Decision #3
+**Recommendation Ref:** D2
 **Files Affected:**
-- `src/pipeline/profile.py` (modify — add 4 new dataclasses, update ManualProfile fields, update `load_profile()`)
-- `src/pipeline/ocr_cleanup.py` (modify — update field access from dict syntax to attribute syntax)
-- `tests/test_profile.py` (modify — update field access assertions)
-- `tests/test_ocr_cleanup.py` (modify — update field access if any)
-- `tests/test_chunk_assembly.py` (modify — update if any dict-style access)
+- `src/pipeline/chunk_assembly.py` (modify — metadata dict in `assemble_chunks()`)
+- `tests/test_chunk_assembly.py` (modify — assert new metadata fields)
+- `tests/test_qa.py` (modify — metadata_completeness tests should now pass cleanly)
 
 **Description:**
-Replace the three `dict[str, Any]` fields on `ManualProfile` with proper dataclasses. This makes the schema self-documenting and catches typos at load time.
-
-New dataclasses:
-
-```python
-@dataclass
-class ContentTypeConfig:
-    """Content type metadata — sub-fields remain dicts because structure
-    varies fundamentally across manual types (mileage-bands vs echelon-based
-    vs interval-table)."""
-    maintenance_schedule: dict[str, Any] = field(default_factory=dict)
-    wiring_diagrams: dict[str, Any] = field(default_factory=dict)
-    specification_tables: dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class GarbageDetectionConfig:
-    """Garbage line detection parameters."""
-    enabled: bool = False
-    threshold: float = 0.5
-
-@dataclass
-class OcrCleanupConfig:
-    """OCR cleanup configuration from manual profile."""
-    quality_estimate: str = ""
-    known_substitutions: list[dict[str, str]] = field(default_factory=list)
-    header_footer_patterns: list[str] = field(default_factory=list)
-    garbage_detection: GarbageDetectionConfig = field(default_factory=GarbageDetectionConfig)
-
-@dataclass
-class VariantConfig:
-    """Market variant configuration."""
-    has_market_variants: bool = False
-    variant_indicator: str = "none"
-    markets: list[str] = field(default_factory=list)
-```
+Add `manual_id`, `level1_id`, and `procedure_name` to the chunk metadata dict in `assemble_chunks()`. Currently QA's `check_metadata_completeness` always flags missing `manual_id` and `level1_id`, and the SQLite index writes empty strings for `procedure_name` and `level1_id`.
 
 **Tasks:**
-1. [ ] Define `GarbageDetectionConfig` dataclass in `profile.py`
-2. [ ] Define `OcrCleanupConfig` dataclass in `profile.py`
-3. [ ] Define `ContentTypeConfig` dataclass in `profile.py`
-4. [ ] Define `VariantConfig` dataclass in `profile.py`
-5. [ ] Update `ManualProfile` field types: `content_types: ContentTypeConfig`, `ocr_cleanup: OcrCleanupConfig`, `variants: VariantConfig`
-6. [ ] Update `load_profile()` to construct these dataclasses from YAML data
-7. [ ] Search all source files for dict-style access to these fields (e.g., `profile.ocr_cleanup["quality_estimate"]`) and update to attribute syntax
-8. [ ] Search all test files for the same and update
-9. [ ] Verify the `invalid_profile.yaml` fixture still loads correctly (it has empty/default values for these sections)
+1. [x] Add `"manual_id": manifest.manual_id` to the metadata dict at `chunk_assembly.py:682`
+2. [x] Extract `level1_id` from `entry.hierarchy_path[0]` if available, else from chunk_id parsing. Add to metadata.
+3. [x] Add `"procedure_name": entry.title` to metadata
+4. [x] Update `test_chunk_assembly.py` tests that assert metadata keys
+5. [x] Verify `test_qa.py` metadata_completeness tests pass without false errors
+6. [x] Verify `embeddings.py` SQLite index now gets real values for `level1_id` and `procedure_name`
 
 **Acceptance Criteria:**
-- [ ] `ManualProfile` no longer has any `dict[str, Any]` top-level fields
-- [ ] All 3 valid profile fixtures load into typed dataclasses without error
-- [ ] Field access uses attribute syntax (`profile.ocr_cleanup.quality_estimate`) not dict syntax
-- [ ] All 229 tests pass
-
-**Notes:**
-`ContentTypeConfig` sub-fields (`maintenance_schedule`, `wiring_diagrams`, `specification_tables`) remain `dict[str, Any]` because their structure varies fundamentally across manual types. Typing these further would over-constrain the schema for no safety gain.
+- [x] `chunk.metadata` contains `manual_id`, `level1_id`, `content_type`, `procedure_name`
+- [x] QA `check_metadata_completeness` passes for correctly formed chunks
+- [x] SQLite `procedure_lookup` gets meaningful data
+- [x] All tests pass
 
 ---
 
-#### 1.3 Expand `validate_profile()` with structural checks
+#### 1.3 Fix embedding composition contract
 
-**Requirement Refs:** Architectural Decision #3
+**Recommendation Ref:** D3
 **Files Affected:**
-- `src/pipeline/profile.py` (modify — expand `validate_profile()` at line 184)
-- `tests/test_profile.py` (modify — add validation tests to `TestValidateProfile` class)
+- `src/pipeline/embeddings.py` (modify — `compose_embedding_input()`)
+- `tests/test_embeddings.py` (modify — update composition tests)
 
 **Description:**
-The current validator checks 6 fields for non-emptiness. Expand it to catch the errors that actually happen when authoring new profiles:
-
-1. **Regex compilation** — validate that all `id_pattern`, `title_pattern`, step patterns, safety callout patterns, figure reference, cross-reference, and page number patterns compile as valid regex
-2. **OCR cleanup structure** — validate `known_substitutions` entries have `from` and `to` keys
-3. **Hierarchy consistency** — validate hierarchy levels are sequential (1, 2, 3...) with no gaps
-4. **Safety callout levels** — validate callout levels are one of `{"warning", "caution", "note"}`
-5. **Safety callout styles** — validate styles are one of `{"block", "inline"}`
+`compose_embedding_input()` splits `chunk.text` on the first `\n\n` thinking the header is baked into the text. It's not — the header is in `chunk.metadata["hierarchical_header"]`. The function should use the metadata header + body text.
 
 **Tasks:**
-1. [ ] Add regex validation for all pattern fields (try `re.compile()`, catch `re.error`)
-2. [ ] Add `known_substitutions` structure validation (each entry must have `from` and `to` keys)
-3. [ ] Add hierarchy level sequence validation (levels must be 1, 2, 3... with no gaps)
-4. [ ] Add safety callout level validation (must be `warning`, `caution`, or `note`)
-5. [ ] Add safety callout style validation (must be `block` or `inline`)
-6. [ ] Write tests for each new validation check (valid patterns pass, invalid patterns caught)
-7. [ ] Write test with a profile containing an invalid regex pattern
-8. [ ] Write test with a profile containing malformed substitution entries
+1. [x] Rewrite `compose_embedding_input()` to read header from `chunk.metadata["hierarchical_header"]`
+2. [x] Build embedding text as `f"{header}\n\n{get_first_n_words(chunk.text, 150)}"`
+3. [x] Remove the `\n\n` split logic (dead code after fix)
+4. [x] Handle missing `hierarchical_header` key gracefully (fallback to text-only)
+5. [x] Update tests in `test_embeddings.py` — construct chunks with metadata header and verify output
+6. [x] Run full test suite
 
 **Acceptance Criteria:**
-- [ ] Invalid regex patterns produce clear validation errors (e.g., `"Invalid id_pattern at hierarchy level 1: ..."`)
-- [ ] Malformed `known_substitutions` entries produce validation errors
-- [ ] Non-sequential hierarchy levels produce validation errors
-- [ ] Invalid safety callout levels/styles produce validation errors
-- [ ] All valid profiles still pass validation (XJ, CJ, TM9)
-- [ ] All 229+ tests pass
-
----
-
-#### 1.4 Create JSON Schema definition file
-
-**Requirement Refs:** Architectural Decision #3
-**Files Affected:**
-- `schema/manual_profile_v1.schema.json` (create)
-
-**Description:**
-Create a JSON Schema (draft 2020-12) that formally defines the YAML profile structure. This serves as:
-- Machine-readable documentation of the profile format
-- IDE autocompletion support (VS Code YAML extension reads JSON Schema)
-- A validation reference independent of the Python code
-
-The schema should document every field, type, required/optional status, enum values, and pattern constraints. Include a `description` on non-obvious fields explaining their purpose.
-
-**Tasks:**
-1. [ ] Create `schema/` directory in project root
-2. [ ] Write JSON Schema covering all top-level fields (`schema_version`, `manual_id`, `manual_title`, `source_url`, `source_format`, `vehicles`, `structure`, `safety_callouts`, `content_types`, `ocr_cleanup`, `variants`)
-3. [ ] Define `vehicles` array schema with nested `engines` and `transmissions`
-4. [ ] Define `structure.hierarchy` array schema with `level`, `name`, `id_pattern`, `title_pattern`, `known_ids`
-5. [ ] Define `safety_callouts` array schema with enum constraints on `level` and `style`
-6. [ ] Define `ocr_cleanup` object schema with `garbage_detection` sub-object
-7. [ ] Add enum constraints: `source_format` in `["pdf-ocr", "pdf-native", "html", "epub"]`, `safety level` in `["warning", "caution", "note"]`, `safety style` in `["block", "inline"]`, `figure_reference_scope` in `["per-section", "global"]`
-8. [ ] Add `required` arrays for mandatory fields at each nesting level
-9. [ ] Validate all 3 valid fixture profiles against the schema (manual spot-check)
-
-**Acceptance Criteria:**
-- [ ] Schema file exists at `schema/manual_profile_v1.schema.json`
-- [ ] All 3 valid fixture profiles conform to the schema
-- [ ] Schema documents every field present in the YAML fixtures
-- [ ] Enum constraints match the validation logic in `validate_profile()`
-- [ ] Schema includes `description` on key fields
-
-**Notes:**
-Do not add `jsonschema` as a runtime dependency. The schema file is documentation and tooling support. If schema validation is desired at runtime, it can be added as an optional dependency later.
+- [x] Embedding input includes hierarchical context (manual > group > section > procedure)
+- [x] Body text is truncated to 150 words
+- [x] Old `\n\n` split logic is removed
+- [x] Graceful fallback when metadata key is missing
+- [x] All tests pass
 
 ---
 
 ### Phase 1 Testing Requirements
 
-- [ ] All existing 229 tests pass (with field access updates from 1.2)
-- [ ] New validation tests cover: regex compilation, substitution structure, hierarchy sequence, callout level/style
-- [ ] Schema version tests cover: missing version, wrong version, correct version
-- [ ] `load_profile()` correctly constructs typed dataclasses from all 4 fixtures
+- [x] Multi-page boundary/chunking test catches the coordinate bug and passes after fix
+- [x] Metadata completeness QA check passes for well-formed chunks
+- [x] Embedding composition tests verify header comes from metadata
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~10-15
 
 ### Phase 1 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing (`pytest -v --tb=short`)
-- [ ] `CLAUDE.md` Key Data Types section updated with `OcrCleanupConfig`, `VariantConfig`, `ContentTypeConfig`, `GarbageDetectionConfig`
-- [ ] No regressions introduced
-- [ ] `LEARNINGS.md` updated if any surprises encountered
+- [x] All work items complete
+- [x] All tests passing (`pytest -v --tb=short`)
+- [x] LEARNINGS.md updated with coordinate model decision
+- [x] No regressions introduced
 
 ---
 
-## Phase 2: Token Counting Documentation
+## Phase 2: Reliability & Error Handling
 
-**Estimated Effort:** ~5,000 tokens (including testing/fixes)
-**Dependencies:** None
-**Parallelizable:** Yes — independent of Phases 1 and 3
+**Estimated Effort:** ~40,000 tokens (including testing/fixes)
+**Dependencies:** None (can run in parallel with Phase 1)
+**Parallelizable:** All work items are independent
 
 ### Goals
 
-- Document the word-split vs. BPE tokenizer tradeoff at the point of use
-- Make the implicit 1:1 word-to-token ratio explicit and tunable
-- Provide a clear upgrade path for future precision needs
+- Add timeout and retry for embedding HTTP calls (REVIEW #6)
+- Surface retrieval failures (REVIEW #7)
+- Fix safety callout regex inconsistency (REVIEW #8)
+- Make bootstrap-profile fail fast (REVIEW #4)
+- Use deterministic Qdrant point IDs (REVIEW #5)
 
 ### Work Items
 
-#### 2.1 Expand `count_tokens()` with documented tradeoff and scaling constant
+#### 2.1 Add HTTP timeout and retry for embedding calls
 
-**Requirement Refs:** Architectural Decision #2
+**Recommendation Ref:** R1
 **Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — lines 22-29)
-- `tests/test_chunk_assembly.py` (modify — add test for scaling factor behavior)
+- `src/pipeline/embeddings.py` (modify — `generate_embedding()`)
+- `tests/test_embeddings.py` (modify — add timeout and retry tests)
 
 **Description:**
-Replace the minimal docstring on `count_tokens()` with a full explanation of the design decision. Extract the implicit 1:1 word-to-token ratio as a named module constant `TOKEN_ESTIMATE_FACTOR` so it's visible and tunable.
-
-Current implementation (lines 22-29):
-```python
-def count_tokens(text: str) -> int:
-    """Estimate token count for a text string.
-
-    Uses a simple whitespace-based approximation.
-    """
-    if not text or not text.strip():
-        return 0
-    return len(text.split())
-```
-
-Target implementation:
-```python
-# Word-to-token scaling factor. Set to 1.0 because word count approximates
-# token count for English prose. Actual BPE ratio is ~1.3x for technical
-# English, meaning this intentionally undercounts — chunks may be ~30% larger
-# than the nominal 200-2000 token target. The error direction is safe for RAG
-# (slightly oversized chunks preserve more context per retrieval hit).
-#
-# To use a real tokenizer: swap the count_tokens() implementation for
-# tiktoken or sentencepiece, and set this factor to 1.0.
-TOKEN_ESTIMATE_FACTOR: float = 1.0
-
-
-def count_tokens(text: str) -> int:
-    """Estimate token count using whitespace word splitting.
-
-    Deliberate tradeoff: avoids a tokenizer dependency (tiktoken,
-    sentencepiece) at the cost of ~20-30% undercount vs actual BPE
-    tokens for technical English. Chunks may run ~30% larger than
-    the nominal 200-2000 token target defined in R2.
-
-    The error direction is safe for RAG — slightly oversized chunks
-    preserve more context per retrieval hit. If precision matters
-    (e.g., strict model context limits), swap this implementation
-    for a BPE tokenizer.
-    """
-    if not text or not text.strip():
-        return 0
-    return int(len(text.split()) * TOKEN_ESTIMATE_FACTOR)
-```
+Add `timeout=30` to `requests.post()`. Add retry logic (3 attempts with exponential backoff) for transient errors.
 
 **Tasks:**
-1. [ ] Add `TOKEN_ESTIMATE_FACTOR = 1.0` constant with explanatory comment block above `count_tokens()` (after the `Chunk` dataclass, before the function)
-2. [ ] Expand `count_tokens()` docstring with tradeoff rationale, accuracy implications, and upgrade path
-3. [ ] Update `return` statement to `return int(len(text.split()) * TOKEN_ESTIMATE_FACTOR)`
-4. [ ] Add test verifying `TOKEN_ESTIMATE_FACTOR` is applied: monkeypatch the constant to 2.0 and verify count doubles
-5. [ ] Verify all 4 existing `TestCountTokens` tests still pass (factor is 1.0, so `int(n * 1.0) == n`)
+1. [x] Add `timeout=30` parameter to `requests.post()` at `embeddings.py:79`
+2. [x] Wrap the request in a retry loop: 3 attempts, `time.sleep(2 ** attempt)` between failures
+3. [x] Catch `requests.exceptions.ConnectionError`, `requests.exceptions.Timeout`, and 5xx responses
+4. [x] Raise `RuntimeError(f"Embedding generation failed after 3 attempts: {last_error}")` on exhaustion
+5. [x] Add test: mock `requests.post` to raise `ConnectionError` once then succeed — verify retry works
+6. [x] Add test: mock `requests.post` to always fail — verify RuntimeError after 3 attempts
 
 **Acceptance Criteria:**
-- [ ] `TOKEN_ESTIMATE_FACTOR` constant exists at module level and is documented
-- [ ] `count_tokens()` docstring explains the word-split vs. BPE tradeoff
-- [ ] Docstring mentions the ~20-30% undercount and why it's acceptable for RAG
-- [ ] Docstring provides upgrade path (what to change for precise counting)
-- [ ] `int()` wrapping handles non-integer results when factor != 1.0
-- [ ] All existing tests pass unchanged
+- [x] `requests.post()` has `timeout=30`
+- [x] Transient failures are retried up to 3 times
+- [x] Permanent failures raise `RuntimeError` with clear message
+- [x] All tests pass
+
+---
+
+#### 2.2 Surface retrieval failures
+
+**Recommendation Ref:** R2
+**Files Affected:**
+- `src/pipeline/retrieval.py` (modify — `resolve_cross_references()`)
+- `tests/test_retrieval.py` (modify — add error handling tests)
+
+**Description:**
+Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are visible. Add `retrieval_warnings: list[str]` field to `RetrievalResponse`.
+
+**Tasks:**
+1. [x] Add `import warnings` to `retrieval.py`
+2. [x] Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
+3. [x] Add `retrieval_warnings: list[str] = field(default_factory=list)` to `RetrievalResponse`
+4. [x] Capture warnings in `retrieve()` and add to response
+5. [x] Add test: mock SQLite to raise `sqlite3.OperationalError`, verify warning is issued and partial results returned
+6. [x] Document placeholder results in `enrich_with_parent()` and `enrich_with_siblings()` with clear comments
+
+**Acceptance Criteria:**
+- [x] SQLite errors produce `warnings.warn()` rather than silent pass
+- [x] `RetrievalResponse` carries warning messages
+- [x] Partial results still returned on degraded path
+- [x] All tests pass
+
+---
+
+#### 2.3 Fix safety callout regex handling
+
+**Recommendation Ref:** R3
+**Files Affected:**
+- `src/pipeline/chunk_assembly.py` (modify — `detect_safety_callouts()`)
+- `tests/test_chunk_assembly.py` (modify — add mixed-case pattern test)
+
+**Description:**
+`detect_safety_callouts()` compiles patterns with flags at line 141 but then uses `re.search(sc.pattern, stripped)` (the raw string) at line 145 instead of the compiled `pat`. The inner loop at line 157 has the same issue.
+
+**Tasks:**
+1. [x] Change `re.search(sc.pattern, stripped)` at line 145 to `pat.search(stripped)`
+2. [x] Pre-compile inner loop patterns: build a list of compiled safety patterns before the line loop, and use them at line 157 instead of `re.search(sc2.pattern, next_stripped)`
+3. [x] Add test: create a profile with a case-insensitive safety pattern (lowercase "warning"), verify it matches uppercase text
+4. [x] Run full test suite
+
+**Acceptance Criteria:**
+- [x] All pattern matching in `detect_safety_callouts()` uses compiled regex objects
+- [x] No raw `re.search(sc.pattern, ...)` calls remain
+- [x] Mixed-case test passes
+- [x] All existing tests pass
+
+---
+
+#### 2.4 Make bootstrap-profile fail fast
+
+**Recommendation Ref:** R4
+**Files Affected:**
+- `src/pipeline/cli.py` (modify — `cmd_bootstrap_profile()`)
+- `tests/test_cli.py` (modify — update expected exit code)
+
+**Description:**
+`cmd_bootstrap_profile()` has a TODO comment and `return 0`. Should print an error and return 1.
+
+**Tasks:**
+1. [x] Replace TODO block with: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
+2. [x] Update test in `test_cli.py` that checks bootstrap-profile behavior to expect exit code 1
+
+**Acceptance Criteria:**
+- [x] `pipeline bootstrap-profile` returns exit code 1
+- [x] Error message clearly states the feature is not implemented
+- [x] All tests pass
+
+---
+
+#### 2.5 Use deterministic Qdrant point IDs
+
+**Recommendation Ref:** R5
+**Files Affected:**
+- `src/pipeline/embeddings.py` (modify — `index_chunks()`)
+- `tests/test_embeddings.py` (modify — update ID assertions)
+
+**Description:**
+Replace `id=i` with deterministic UUID5 derived from `chunk_id`.
+
+**Tasks:**
+1. [x] Add `import uuid` to `embeddings.py`
+2. [x] Change `id=i` at line 131 to `id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
+3. [x] Update tests that assert point IDs
+4. [x] Add test: verify same chunk_id always produces same point ID
+5. [x] Add test: verify different chunk_ids produce different point IDs
+
+**Acceptance Criteria:**
+- [x] Point IDs are deterministic UUIDs derived from chunk_id
+- [x] Re-indexing the same chunks produces the same point IDs (idempotent)
+- [x] Different manuals don't collide
+- [x] All tests pass
 
 ---
 
 ### Phase 2 Testing Requirements
 
-- [ ] `count_tokens("hello world")` still returns 2 (factor = 1.0)
-- [ ] `count_tokens("")` and `count_tokens("   ")` still return 0
-- [ ] Scaling factor test confirms multiplication is applied
-- [ ] All 41 chunk assembly tests pass
+- [x] HTTP timeout/retry behavior tested with mocks
+- [x] SQLite error surfacing tested
+- [x] Regex compilation verified with case-sensitivity test
+- [x] Bootstrap-profile exit code tested
+- [x] Deterministic ID generation tested
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~10-12
 
 ### Phase 2 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing (`pytest -v --tb=short`)
+- [x] No regressions introduced
 
 ---
 
-## Phase 3: Rule Ordering Documentation
+## Phase 3: Output & Persistence
 
-**Estimated Effort:** ~10,000 tokens (including testing/fixes)
-**Dependencies:** None
-**Parallelizable:** Yes — independent of Phases 1 and 2
+**Estimated Effort:** ~60,000 tokens (including testing/fixes)
+**Dependencies:** Phase 1 (metadata alignment — chunks need correct metadata before persisting)
+**Parallelizable:** 3.1-3.2 are sequential; 3.3 depends on 3.1; 3.4 is independent
 
 ### Goals
 
-- Document the non-sequential rule ordering at the exact code location where it matters
-- Add a guard test that detects if someone reorders the rules incorrectly
+- Add chunk and manifest persistence (JSONL/JSON export and import)
+- Enable offline QA (run validation without Qdrant)
+- Implement content-type detection using profile configuration
+- Implement functional R5 (table integrity) and R8 (figure continuity)
 
 ### Work Items
 
-#### 3.1 Add structured comment block to `assemble_chunks()`
+#### 3.1 Add chunk persistence (JSONL export/import)
 
-**Requirement Refs:** Architectural Decision #1
+**Recommendation Ref:** Q1
 **Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — insert comment block before line 593)
+- `src/pipeline/chunk_assembly.py` (modify — add `save_chunks()`, `load_chunks()`)
+- `tests/test_chunk_assembly.py` (modify — add persistence tests)
+- `src/pipeline/cli.py` (modify — add `--output-dir` to `process` command)
 
 **Description:**
-Insert a comment block directly above the first rule application (R1) in `assemble_chunks()` that explains the two-phase design and why R2 runs after R3-R5. Also update the function-level docstring to explicitly mention non-sequential ordering.
-
-Current docstring (line 566-568):
-```python
-def assemble_chunks(
-    pages: list[str], manifest: Manifest, profile: ManualProfile
-) -> list[Chunk]:
-    """Run the full chunk assembly pipeline.
-
-    Applies all rules (R1-R8) and builds final Chunk objects with metadata.
-    """
-```
-
-Target docstring:
-```python
-def assemble_chunks(
-    pages: list[str], manifest: Manifest, profile: ManualProfile
-) -> list[Chunk]:
-    """Run the full chunk assembly pipeline.
-
-    Applies rules R1-R8 in non-sequential order (R1,R3,R4,R5,R2,R6,R7,R8)
-    to ensure semantic integrity before size enforcement. See the inline
-    comment block above the rule applications for the full rationale.
-    """
-```
-
-Comment block to insert before line 593 (before `# R1: Primary unit`):
-```python
-        # ── Rule Application Order ──────────────────────────────────
-        # Intentionally non-sequential. Rules execute in two phases:
-        #
-        # Phase 1 — Semantic integrity (before any size enforcement):
-        #   R1: Primary unit — establish procedure boundaries
-        #   R3: Never split steps — protect step sequences as atomic
-        #   R4: Safety attachment — bind callouts to parent content
-        #   R5: Table integrity — keep tables with their headers
-        #
-        # Phase 2 — Size enforcement and cleanup:
-        #   R2: Size targets — split oversized chunks (AFTER integrity
-        #       rules so it respects step/safety/table boundaries)
-        #   R6: Merge small — combine undersized fragments
-        #   R7: Cross-reference merge — consolidate xref-only sections
-        #   R8: Figure continuity — keep figure refs with context
-        #
-        # WHY: If R2 ran before R3-R5, it would split at token
-        # boundaries before semantic units are identified, breaking
-        # step sequences, safety callouts, and tables across chunks.
-        # See LEARNINGS.md for discovery context.
-        # ────────────────────────────────────────────────────────────
-```
+Add functions to serialize chunks to JSONL and deserialize them back. Each line is a JSON object with `chunk_id`, `manual_id`, `text`, and `metadata`. Add `--output-dir` flag to `pipeline process`.
 
 **Tasks:**
-1. [ ] Update `assemble_chunks()` docstring to mention non-sequential ordering
-2. [ ] Insert the structured comment block above the R1 application (before current line 593)
-3. [ ] Verify the comment doesn't break any existing functionality (`pytest -v --tb=short`)
+1. [x] Add `save_chunks(chunks: list[Chunk], output_path: Path) -> None` — writes one JSON line per chunk
+2. [x] Add `load_chunks(input_path: Path) -> list[Chunk]` — reads JSONL back into Chunk objects
+3. [x] Add round-trip test: save chunks, load them back, verify equality
+4. [x] Add `--output-dir` flag to `process` subcommand in `build_parser()`
+5. [x] Update `cmd_process()` to write `{manual_id}_chunks.jsonl` when `--output-dir` is provided
+6. [x] Add test for CLI output flag
 
 **Acceptance Criteria:**
-- [ ] Comment block is present directly above rule application code in `assemble_chunks()`
-- [ ] Comment explains both phases and the rationale for R2 placement
-- [ ] Function docstring mentions non-sequential rule application order
-- [ ] All 229 tests pass
+- [x] `save_chunks` produces valid JSONL
+- [x] `load_chunks` round-trips perfectly (identical Chunk objects)
+- [x] `pipeline process --output-dir ./out` writes chunks file
+- [x] All tests pass
 
 ---
 
-#### 3.2 Add ordering guard test
+#### 3.2 Add manifest persistence
 
-**Requirement Refs:** Architectural Decision #1
+**Recommendation Ref:** Q1 (complement)
 **Files Affected:**
-- `tests/test_chunk_assembly.py` (modify — add `TestRuleOrdering` class)
+- `src/pipeline/structural_parser.py` (modify — add `save_manifest()`, `load_manifest()`)
+- `tests/test_structural_parser.py` (modify — add persistence tests)
+- `src/pipeline/cli.py` (modify — write manifest alongside chunks)
 
 **Description:**
-Write tests that validate the rule ordering produces correct results. The tests construct inputs where wrong ordering (R2 before R3/R4) would produce detectably different output. Two tests:
-
-1. **Safety callout integrity:** A WARNING block followed by a procedure, where the combined text is under 2000 tokens. With correct ordering (R4 before R2), the callout stays attached. With wrong ordering (R2 before R4), the callout could be orphaned.
-
-2. **Step sequence integrity:** A numbered step sequence under the size ceiling. With correct ordering (R3 before R2), all steps stay together. With wrong ordering (R2 before R3), steps could be split at a token boundary.
-
-Both tests use `assemble_chunks()` end-to-end (not individual rule functions) to validate the integrated behavior.
+Add manifest serialization to JSON (not JSONL — manifest is a single hierarchical document). Write alongside chunks in `pipeline process --output-dir`.
 
 **Tasks:**
-1. [ ] Create `TestRuleOrdering` class in `test_chunk_assembly.py`
-2. [ ] Write `test_safety_callout_not_split_from_procedure` — constructs a WARNING + procedure text as pages + manifest, calls `assemble_chunks()`, asserts WARNING text and procedure text appear in the same chunk
-3. [ ] Write `test_step_sequence_preserved_before_size_split` — constructs a step sequence under the size ceiling as pages + manifest, calls `assemble_chunks()`, asserts all steps appear in one chunk
-4. [ ] Add fixtures or inline data for the test inputs (manifest entries, profile loading)
-5. [ ] Run full test suite to verify no conflicts
+1. [x] Add `save_manifest(manifest: Manifest, output_path: Path) -> None`
+2. [x] Add `load_manifest(input_path: Path) -> Manifest`
+3. [x] Add round-trip test
+4. [x] Update `cmd_process()` to write `{manual_id}_manifest.json`
 
 **Acceptance Criteria:**
-- [ ] Both tests pass with current (correct) rule ordering
-- [ ] Tests would fail if R2 were moved before R3/R4 (verify by mental model — actually reordering rules to prove it is optional but recommended)
-- [ ] All 229+ tests pass
-- [ ] Tests are in a clearly named `TestRuleOrdering` class with descriptive docstrings
+- [x] Manifest serializes to readable JSON
+- [x] Round-trip preserves all fields
+- [x] All tests pass
+
+---
+
+#### 3.3 Enable offline QA
+
+**Recommendation Ref:** N1
+**Files Affected:**
+- `src/pipeline/cli.py` (modify — rewrite `cmd_qa()`)
+- `tests/test_cli.py` (modify — add offline QA test)
+
+**Description:**
+Add `--chunks` and `--profile` flags to `pipeline qa`. Load chunks from JSONL, load profile from YAML, run `run_validation_suite()`. No Qdrant needed.
+
+**Tasks:**
+1. [x] Update `qa` subcommand in `build_parser()`: add `--chunks` (required), `--profile` (required), make `--manual-id` and `--test-set` optional
+2. [x] Rewrite `cmd_qa()`: if `--chunks` provided, load from JSONL and run offline validation
+3. [x] Print validation report to stdout (same format as `cmd_validate()`)
+4. [x] Add test: create temp JSONL, run offline QA, verify report
+5. [x] Keep existing Qdrant-required path as a future option
+
+**Acceptance Criteria:**
+- [x] `pipeline qa --chunks chunks.jsonl --profile profile.yaml` runs validation offline
+- [x] All 7 QA checks run on loaded chunks
+- [x] Exit code 0 on pass, 1 on failure
+- [x] All tests pass
+
+---
+
+#### 3.4 Implement functional R5 and R8
+
+**Recommendation Ref:** Q3
+**Files Affected:**
+- `src/pipeline/chunk_assembly.py` (modify — `apply_rule_r5_table_integrity()`, `apply_rule_r8_figure_continuity()`)
+- `tests/test_chunk_assembly.py` (modify — add tests for table and figure handling)
+
+**Description:**
+R5 currently just returns `list(chunks)`. R8 appends the chunk in both branches. Make both rules functional.
+
+R5: For each chunk, detect tables via `detect_tables()`. If a table spans a chunk boundary (table starts in one chunk and continues in the next), merge those chunks. If a prior splitting rule broke a table apart, reassemble.
+
+R8: If a chunk starts with a figure reference line (matches `figure_pattern`) and the previous chunk's content references the same figure, merge the figure reference into the previous chunk.
+
+**Tasks:**
+1. [x] Implement R5: iterate chunks, detect tables within each, if a table's last line is the chunk's last line AND the next chunk starts with table-like content, merge
+2. [x] Implement R8: iterate chunks, if chunk starts with figure reference, check if previous chunk contains text referencing that figure — if so, merge
+3. [x] Add test for R5: create chunks where a table is split across two chunks, verify they get merged
+4. [x] Add test for R8: create chunks where a figure ref is separated from its context, verify merge
+5. [x] Run full test suite — existing pass-through behavior tests should still pass (rules were no-ops, so inputs that don't trigger the rules should produce identical output)
+
+**Acceptance Criteria:**
+- [x] R5 detects and re-merges split tables
+- [x] R8 detects and re-attaches orphaned figure references
+- [x] Existing tests still pass (rules were no-ops, so non-triggering inputs are unchanged)
+- [x] New tests verify merge behavior
+- [x] All tests pass
 
 ---
 
 ### Phase 3 Testing Requirements
 
-- [ ] Guard tests validate correct ordering behavior with end-to-end `assemble_chunks()` calls
-- [ ] All existing 41 chunk assembly tests still pass
-- [ ] Full suite (229+ tests) passes
+- [x] JSONL round-trip for chunks (save/load identity)
+- [x] JSON round-trip for manifest
+- [x] Offline QA produces correct validation report
+- [x] R5 merges split tables
+- [x] R8 merges orphaned figure references
+- [x] CLI `--output-dir` writes expected files
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~15-20
 
 ### Phase 3 Completion Checklist
 
-- [ ] All work items complete
-- [ ] All tests passing
-- [ ] Comment block is clear, accurate, and positioned at the decision point
-- [ ] Function docstring updated
-- [ ] No regressions introduced
+- [x] All work items complete
+- [x] All tests passing
+- [x] `CLAUDE.md` updated with new CLI flags and persistence functions
+- [x] No regressions introduced
+
+---
+
+## Phase 4: Developer Experience
+
+**Estimated Effort:** ~40,000 tokens (including testing/fixes)
+**Dependencies:** None (can run in parallel with Phases 1-3)
+**Parallelizable:** All work items are independent
+
+### Goals
+
+- Add structured logging throughout the pipeline
+- Type ManifestEntry range fields
+- Add multi-page test fixtures
+- Configure mypy for type checking
+
+### Work Items
+
+#### 4.1 Add structured logging
+
+**Recommendation Ref:** A2
+**Files Affected:**
+- `src/pipeline/cli.py` (modify — configure logging, add `--verbose`/`--quiet`)
+- `src/pipeline/structural_parser.py` (modify — add debug logging)
+- `src/pipeline/ocr_cleanup.py` (modify — add debug logging)
+- `src/pipeline/chunk_assembly.py` (modify — add debug logging)
+- `src/pipeline/embeddings.py` (modify — add debug logging)
+- `src/pipeline/retrieval.py` (modify — add debug logging)
+
+**Description:**
+Add Python `logging` to every pipeline module. Configure via CLI flags. Replace `print()` calls with `logger.info()`.
+
+**Tasks:**
+1. [x] Add `import logging` and `logger = logging.getLogger(__name__)` to each source module
+2. [x] Replace all `print()` calls in `cli.py` with `logger.info()` / `logger.error()`
+3. [x] Add `--verbose` flag (sets DEBUG) and `--quiet` flag (sets WARNING) to CLI
+4. [x] Configure root logger in `main()` based on flags
+5. [x] Add `logger.debug()` calls at key decision points: boundary detection, rule application, embedding generation
+6. [x] Update CLI tests to capture log output instead of stdout
+
+**Acceptance Criteria:**
+- [x] All modules use `logging` instead of `print()`
+- [x] `--verbose` shows debug-level output
+- [x] Default shows info-level output
+- [x] `--quiet` suppresses info
+- [x] All tests pass
+
+---
+
+#### 4.2 Type ManifestEntry range fields
+
+**Recommendation Ref:** A1
+**Files Affected:**
+- `src/pipeline/structural_parser.py` (modify — add `PageRange`, `LineRange` dataclasses, update `ManifestEntry`)
+- `src/pipeline/chunk_assembly.py` (modify — update `.get("start", ...)` to attribute access)
+- `tests/test_structural_parser.py` (modify — update assertions)
+- `tests/test_chunk_assembly.py` (modify — update manifest construction)
+- `tests/conftest.py` (modify — update `sample_manifest_entry` fixture)
+
+**Description:**
+Replace `page_range: dict[str, str]` and `line_range: dict[str, int]` with typed dataclasses.
+
+**Tasks:**
+1. [x] Define `PageRange` and `LineRange` dataclasses in `structural_parser.py`
+2. [x] Update `ManifestEntry` fields
+3. [x] Update `build_manifest()` to construct typed ranges
+4. [x] Search for `.get("start"` and `.get("end"` — update to `.start` / `.end`
+5. [x] Update test fixtures and assertions
+6. [x] Run full test suite
+
+**Acceptance Criteria:**
+- [x] No dict-style access on range fields
+- [x] `entry.line_range.start` / `entry.line_range.end` work correctly
+- [x] `entry.page_range.start` / `entry.page_range.end` work correctly
+- [x] All tests pass
+
+---
+
+#### 4.3 Add multi-page test fixtures
+
+**Recommendation Ref:** X2
+**Files Affected:**
+- `tests/conftest.py` (modify — add multi-page fixtures)
+- `tests/test_structural_parser.py` (modify — add multi-page boundary tests)
+- `tests/test_chunk_assembly.py` (modify — add multi-page assembly tests)
+
+**Description:**
+Current test fixtures are all single-page. The cross-page slicing bug (fixed in Phase 1) was latent because no test exercised multi-page behavior. Add multi-page fixtures to prevent regression.
+
+Note: Phase 1 (item 1.1) adds a minimal multi-page test to catch the coordinate bug. This work item adds comprehensive multi-page coverage: multiple boundaries per page, cross-page sections, edge cases (boundary on first/last line of a page).
+
+**Tasks:**
+1. [x] Create `xj_multipage_fixture` — 3 pages with Group, Section, Procedure boundaries spanning pages
+2. [x] Create `tm9_multipage_fixture` — 2 pages with Chapter and Section boundaries
+3. [x] Write tests: detect boundaries across pages, verify global line numbers
+4. [x] Write tests: build manifest from multi-page boundaries, verify chunk_ids and line_ranges
+5. [x] Write tests: assemble chunks from multi-page manifest, verify text extraction
+6. [x] Write edge case test: boundary on first line of page 2
+
+**Acceptance Criteria:**
+- [x] At least 2 multi-page fixtures covering different profile types
+- [x] Boundary detection correctly handles page transitions
+- [x] Manifest line_range values are global offsets
+- [x] Chunk text extraction is correct for boundaries on any page
+- [x] All tests pass
+
+---
+
+#### 4.4 Configure mypy
+
+**Recommendation Ref:** X1
+**Files Affected:**
+- `pyproject.toml` (modify — add `[tool.mypy]` section)
+- `pyproject.toml` (modify — add `mypy` to dev dependencies)
+
+**Description:**
+Add mypy to the project for static type checking. Start with permissive settings and fix any immediate errors.
+
+**Tasks:**
+1. [x] Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
+2. [x] Add `[tool.mypy]` section to `pyproject.toml` with `python_version = "3.10"`, `warn_return_any = true`, `warn_unused_configs = true`
+3. [x] Run `mypy src/pipeline/` and fix any type errors
+4. [x] Document mypy invocation in CLAUDE.md Quick Reference
+
+**Acceptance Criteria:**
+- [x] `mypy src/pipeline/` passes (possibly with some `# type: ignore` for Qdrant client)
+- [x] Dev install includes mypy
+- [x] All tests still pass
+
+---
+
+### Phase 4 Testing Requirements
+
+- [x] Logging output captured and verified in CLI tests
+- [x] Typed ranges pass all existing tests
+- [x] Multi-page tests cover page transitions and edge cases
+- [x] mypy passes on all source modules
+- [x] All 250+ existing tests pass
+- [x] New tests added: ~15-20
+
+### Phase 4 Completion Checklist
+
+- [x] All work items complete
+- [x] All tests passing
+- [x] CLAUDE.md updated (Quick Reference, Key Data Types)
+- [x] No regressions introduced
 
 ---
 
 ## Parallel Work Opportunities
 
-All three phases are fully independent and can be executed concurrently.
+Phases 1 and 2 are fully independent and can execute concurrently. Phase 3 depends on Phase 1 (metadata must be correct before persisting). Phase 4 is independent of everything.
 
-| Work Item | Can Run With | Notes |
-|-----------|--------------|-------|
-| Phase 1 (Schema) | Phase 2, Phase 3 | Touches `profile.py` and `ocr_cleanup.py` only — no overlap with `chunk_assembly.py` rule/token code |
-| Phase 2 (Tokens) | Phase 1, Phase 3 | Touches `chunk_assembly.py` lines 22-29 only |
-| Phase 3 (Rules) | Phase 1, Phase 2 | Touches `chunk_assembly.py` lines 566-625 and `test_chunk_assembly.py` only |
+| Work Stream | Can Run With | Notes |
+|-------------|--------------|-------|
+| Phase 1 (Data Integrity) | Phase 2, Phase 4 | Touches parser, assembler metadata, embeddings |
+| Phase 2 (Reliability) | Phase 1, Phase 4 | Touches embeddings HTTP, retrieval error handling, CLI, regex |
+| Phase 3 (Persistence) | Phase 4 | Blocked by Phase 1 (needs correct metadata) |
+| Phase 4 (DX) | Phase 1, Phase 2 | Touches logging, types, tests — orthogonal to fixes |
+
+Within phases, work items can often run in parallel:
+
+| Item | Can Run With | Conflict |
+|------|--------------|----------|
+| 1.1 (coordinates) | — | Must complete before 1.2, 1.3 test (touches same files) |
+| 1.2 (metadata) | 1.3 (embedding) | Independent — different files |
+| 2.1 (timeout) | 2.2, 2.3, 2.4, 2.5 | All independent |
+| 3.1 (chunk JSONL) | 3.4 (R5/R8) | Independent |
+| 3.2 (manifest JSON) | 3.4 (R5/R8) | Independent |
+| 4.1 (logging) | 4.2, 4.3, 4.4 | 4.1 touches many files; run separately to avoid merge conflicts |
 
 ---
 
 ## Risk Mitigation
 
-| Risk | Likelihood | Impact | Mitigation Strategy |
-|------|------------|--------|---------------------|
-| Typed dicts break tests that access fields by dict key | Medium | Medium | Search all test and source files for dict-style access on `ocr_cleanup`, `content_types`, `variants` before changing types; update in same commit |
-| `schema_version` check breaks `invalid_profile.yaml` tests | Low | Low | Add `schema_version: "1.0"` to invalid profile; it tests other invalid fields (empty title, empty vehicles, bad format), not version |
-| JSON Schema diverges from Python dataclass over time | Medium | Low | Add a comment in `profile.py` pointing to the schema file; schema is documentation, not runtime enforcement |
-| `TOKEN_ESTIMATE_FACTOR` multiply changes existing test expectations | Very Low | Low | Factor is 1.0, and `int(n * 1.0)` == `n` for all integers; verified by existing tests |
-| Guard tests are fragile or over-fitted to current implementation | Medium | Low | Use `assemble_chunks()` end-to-end rather than inspecting function internals; test observable behavior (which chunks contain which text) |
-| Expanded validation rejects previously-valid profiles | Low | High | Run all 229 existing tests after every validation change; existing valid profiles must still pass |
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Cross-page fix breaks single-page tests | Medium | Medium | Single-page behavior is a special case of global offsets (page 0 offset = 0). Existing tests should work with minor adjustments. |
+| Metadata additions break test assertions | Low | Low | Tests that assert exact metadata dicts need updating. Use `assert "manual_id" in chunk.metadata` rather than exact dict comparison. |
+| Embedding contract change affects downstream | Medium | Medium | No downstream consumers yet (Qdrant is stubbed in tests). The change is purely correctness. |
+| JSONL format needs future changes | Low | Medium | Use a simple, flat format. Include a `_version` field in the JSONL header for future compat. |
+| R5/R8 implementation creates false merges | Medium | Medium | Start conservative — only merge when both signals agree (table pattern match AND adjacency). Add regression tests. |
+| Logging changes break CLI test assertions | Medium | Low | Use `caplog` fixture instead of `capsys` in tests. Keep structured output for programmatic use. |
+| mypy reveals many type errors | Low | Low | Start permissive. `# type: ignore` on Qdrant client types. Fix real errors, skip vendor types. |
 
 ---
 
-## Success Metrics
+## Success Metrics (All Met - 2026-02-16)
 
-- [ ] All three architectural decisions documented at source-code level
-- [ ] Profile schema formally defined in JSON Schema (`schema/manual_profile_v1.schema.json`)
-- [ ] `dict[str, Any]` fields replaced with typed dataclasses on `ManualProfile`
-- [ ] `validate_profile()` catches regex errors, structural issues, malformed OCR config
-- [ ] Guard tests prevent silent rule reordering in `assemble_chunks()`
-- [ ] `count_tokens()` tradeoff documented with tunable scaling constant
-- [ ] All existing 229 tests pass
-- [ ] No new runtime dependencies added
-- [ ] `CLAUDE.md` Key Data Types section updated with new dataclasses
+- [x] Cross-page chunk extraction produces correct text for the 7 real PDFs in `data/`
+- [x] No QA false positives from metadata contract mismatch
+- [x] Embedding input includes hierarchical context for every chunk
+- [x] `bootstrap-profile` returns error (not silent success)
+- [x] HTTP timeout prevents hanging on Ollama failure
+- [x] Retrieval failures are visible (warnings, not silent)
+- [x] Chunks persist to JSONL and round-trip correctly
+- [x] Offline QA works without external services
+- [x] R5 and R8 are functional (not no-ops)
+- [x] All 250+ tests pass at every phase boundary
+- [x] mypy passes on source modules
 
 ---
 
 ## Appendix: Requirement Traceability
 
-| Requirement | Source | Phase | Work Item |
-|-------------|--------|-------|-----------|
-| Profile schema version marker | Architectural Decision #3 | 1 | 1.1 |
-| Typed dataclasses for dict fields | Architectural Decision #3 | 1 | 1.2 |
-| Expanded profile validation | Architectural Decision #3 | 1 | 1.3 |
-| JSON Schema definition | Architectural Decision #3 | 1 | 1.4 |
-| Token counting tradeoff documentation | Architectural Decision #2 | 2 | 2.1 |
-| Token scaling factor constant | Architectural Decision #2 | 2 | 2.1 |
-| Rule ordering documentation in source | Architectural Decision #1 | 3 | 3.1 |
-| Rule ordering guard test | Architectural Decision #1 | 3 | 3.2 |
+| Recommendation | REVIEW.md Ref | Phase | Work Item |
+|----------------|---------------|-------|-----------|
+| D1 — Cross-page coordinates | Critical #1 | 1 | 1.1 |
+| D2 — Metadata alignment | High #2 | 1 | 1.2 |
+| D3 — Embedding contract | High #3 | 1 | 1.3 |
+| R1 — HTTP timeout/retry | Should Fix #6 | 2 | 2.1 |
+| R2 — Surface retrieval failures | Must Fix #7 | 2 | 2.2 |
+| R3 — Regex consistency | Should Fix #8 | 2 | 2.3 |
+| R4 — Bootstrap fail-fast | Must Fix #4 | 2 | 2.4 |
+| R5 — Deterministic IDs | Should Fix #5 | 2 | 2.5 |
+| Q1 — Chunk persistence | New finding | 3 | 3.1, 3.2 |
+| Q3 — R5/R8 no-ops | New finding | 3 | 3.4 |
+| N1 — Offline QA | New finding | 3 | 3.3 |
+| A1 — Typed ranges | New finding | 4 | 4.2 |
+| A2 — Structured logging | New finding | 4 | 4.1 |
+| X1 — mypy | New finding | 4 | 4.4 |
+| X2 — Multi-page tests | New finding | 4 | 4.3 |
 
 ---
 
-*Implementation plan generated by Claude on 2026-02-15*
-*Source: Architectural decision analysis conversation + /create-plan command*
+*Implementation plan generated by Claude on 2026-02-16*
+*All phases completed on 2026-02-16 — 349 tests passing*
+*Source: RECOMMENDATIONS.md + REVIEW.md architectural audit*

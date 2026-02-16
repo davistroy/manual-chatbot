@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.structural_parser import LineRange, PageRange
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
@@ -219,6 +221,154 @@ Refer to Group 19 for steering procedures.
 
 
 @pytest.fixture
+def xj_multipage_pages() -> list[str]:
+    """Two-page XJ manual content with boundaries on each page.
+
+    Page 0 has a group boundary ('0 Lubrication and Maintenance') at line 0
+    and a section boundary ('SERVICE PROCEDURES') at line 4.
+    Page 1 has a procedure boundary ('JUMP STARTING PROCEDURE') at line 2.
+
+    Used to verify that detect_boundaries records global line offsets
+    rather than per-page offsets, so that assemble_chunks extracts the
+    correct text from the concatenated page stream.
+    """
+    page0 = (
+        "0 Lubrication and Maintenance\n"
+        "\n"
+        "Introduction to maintenance procedures for all models.\n"
+        "\n"
+        "SERVICE PROCEDURES\n"
+        "\n"
+        "Overview of service procedures follows."
+    )
+    page1 = (
+        "Additional overview text from page 2.\n"
+        "\n"
+        "JUMP STARTING PROCEDURE\n"
+        "\n"
+        "WARNING: REVIEW COMPLETE JUMP STARTING PROCEDURE BEFORE\n"
+        "PROCEEDING. IMPROPER PROCEDURE COULD RESULT IN PERSONAL\n"
+        "INJURY OR PROPERTY DAMAGE FROM BATTERY EXPLOSION.\n"
+        "\n"
+        "(1) Connect positive cable to booster battery.\n"
+        "(2) Connect other end to discharged battery positive.\n"
+        "(3) Connect negative cable to booster battery.\n"
+        "(4) Connect other negative end to engine ground."
+    )
+    return [page0, page1]
+
+
+@pytest.fixture
+def three_page_manual_pages() -> list[str]:
+    """Three-page XJ manual content with boundaries spanning all pages.
+
+    Page 0 (10 lines):
+        Line 0: Group boundary '7 Cooling System' (level 1)
+        Line 4: Section boundary 'SERVICE PROCEDURES' (level 2)
+
+    Page 1 (16 lines):
+        Line 2: Procedure boundary 'RADIATOR DRAINING AND REFILLING' (level 3)
+        Lines 4-6: WARNING safety callout
+        Lines 8-13: Numbered steps (1)-(6)
+        Line 15: Figure reference (Fig. 1)
+
+    Page 2 (14 lines):
+        Line 0: Procedure boundary 'THERMOSTAT - REMOVAL AND INSTALLATION' (level 3)
+        Lines 2-4: CAUTION safety callout
+        Lines 6-11: Numbered steps (1)-(6)
+        Line 13: Specification table line
+
+    Used to verify:
+    - Global line offsets across 3 pages
+    - Manifest page ranges spanning multiple pages
+    - Safety callout detection on later pages
+    - Step sequence and figure reference integrity across pages
+    """
+    page0 = (
+        "7 Cooling System\n"
+        "\n"
+        "The cooling system maintains proper engine operating temperature.\n"
+        "\n"
+        "SERVICE PROCEDURES\n"
+        "\n"
+        "The following procedures cover cooling system maintenance\n"
+        "and component replacement for all engine configurations.\n"
+        "\n"
+        "Refer to Group 9 for engine-specific coolant routing."
+    )
+    page1 = (
+        "Additional cooling system information continued.\n"
+        "\n"
+        "RADIATOR DRAINING AND REFILLING\n"
+        "\n"
+        "WARNING: THE COOLING SYSTEM IS PRESSURIZED. NEVER REMOVE THE\n"
+        "RADIATOR CAP WHILE THE ENGINE IS HOT. SCALDING COOLANT AND\n"
+        "STEAM CAN CAUSE SERIOUS BURNS.\n"
+        "\n"
+        "(1) Allow the engine to cool completely before servicing.\n"
+        "(2) Place a drain pan under the radiator petcock valve.\n"
+        "(3) Slowly open the petcock and allow coolant to drain.\n"
+        "(4) Close the petcock when coolant flow stops.\n"
+        "(5) Fill the radiator with a 50/50 mixture of coolant and water.\n"
+        "(6) Start the engine and check for leaks at all connections.\n"
+        "\n"
+        "See the cooling system hose routing diagram (Fig. 1)."
+    )
+    page2 = (
+        "THERMOSTAT - REMOVAL AND INSTALLATION\n"
+        "\n"
+        "CAUTION: Do not pry the thermostat housing. Use only the\n"
+        "gasket scraper to remove the old gasket material. Prying\n"
+        "can damage the aluminum housing surface.\n"
+        "\n"
+        "(1) Drain the cooling system as described above.\n"
+        "(2) Remove the two bolts securing the thermostat housing.\n"
+        "(3) Remove the housing and extract the thermostat.\n"
+        "(4) Clean the gasket surfaces on both the housing and intake.\n"
+        "(5) Install the new thermostat with the spring toward the engine.\n"
+        "(6) Install a new gasket and the housing. Torque bolts to 200 in-lbs.\n"
+        "\n"
+        "Thermostat Rating .............. 195 deg F (91 deg C)"
+    )
+    return [page0, page1, page2]
+
+
+@pytest.fixture
+def page_boundary_edge_case_pages() -> list[str]:
+    """Pages where a section boundary appears at the very last line of a page.
+
+    Page 0 (5 lines):
+        Line 0: Group boundary '5 Brakes'
+        Lines 2-3: Intro content
+        Line 4: Section boundary 'SERVICE PROCEDURES' at the last line
+
+    Page 1 (6 lines):
+        Line 0: Content that belongs to the section started on page 0
+        Lines 2-5: Procedure steps
+
+    Verifies that boundaries on the last line of a page still get correct
+    global line offsets and that content on the following page is correctly
+    associated.
+    """
+    page0 = (
+        "5 Brakes\n"
+        "\n"
+        "The brake system provides reliable stopping power.\n"
+        "Always use genuine replacement parts.\n"
+        "SERVICE PROCEDURES"
+    )
+    page1 = (
+        "The following brake procedures apply to all models.\n"
+        "\n"
+        "(1) Raise and support the vehicle securely.\n"
+        "(2) Remove the wheel and tire assembly.\n"
+        "(3) Inspect the brake components for wear.\n"
+        "(4) Reassemble in reverse order."
+    )
+    return [page0, page1]
+
+
+@pytest.fixture
 def sample_manifest_entry() -> dict:
     """A sample manifest entry dict for chunk assembly testing."""
     return {
@@ -232,8 +382,8 @@ def sample_manifest_entry() -> dict:
             "Jump Starting Procedure",
         ],
         "content_type": "procedure",
-        "page_range": {"start": "0-9", "end": "0-10"},
-        "line_range": {"start": 1842, "end": 1923},
+        "page_range": PageRange(start="0-9", end="0-10"),
+        "line_range": LineRange(start=1842, end=1923),
         "vehicle_applicability": ["Cherokee XJ"],
         "engine_applicability": ["all"],
         "drivetrain_applicability": ["all"],

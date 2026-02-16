@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from pipeline.profile import load_profile
 from pipeline.structural_parser import (
     Boundary,
+    LineRange,
     Manifest,
     ManifestEntry,
+    PageRange,
     build_manifest,
     detect_boundaries,
     generate_chunk_id,
+    load_manifest,
+    save_manifest,
     validate_boundaries,
 )
 
@@ -118,12 +124,58 @@ class TestDetectBoundaries:
         if boundaries:
             assert boundaries[0].page_number == 1
 
-    def test_records_line_number(self, xj_profile_path):
+    def test_records_line_number_as_global_offset(self, xj_profile_path):
+        """line_number must be a global offset into the concatenated page stream."""
         profile = load_profile(xj_profile_path)
         pages = ["Some preceding text\n\n0 Lubrication and Maintenance\nContent"]
         boundaries = detect_boundaries(pages, profile)
         if boundaries:
-            assert boundaries[0].line_number >= 0
+            # "0 Lubrication..." is on line index 2 within page 0 (and globally)
+            assert boundaries[0].line_number == 2
+
+    def test_multipage_line_numbers_are_global(
+        self, xj_profile_path, xj_multipage_pages
+    ):
+        """Boundaries on page 2+ must have global (absolute) line offsets.
+
+        Page 0 has 7 lines (indices 0-6). Page 1 has 12 lines (indices 0-11).
+        After concatenation, page 1's lines start at global index 7.
+        The procedure boundary 'JUMP STARTING PROCEDURE' is at page-local
+        line 2, so its global offset must be 7 + 2 = 9.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(xj_multipage_pages, profile)
+
+        # Should detect at least: group on page 0, section on page 0,
+        # procedure on page 1
+        assert len(boundaries) >= 3
+
+        proc_bounds = [b for b in boundaries if b.level == 3]
+        assert len(proc_bounds) >= 1, "Must detect procedure boundary on page 1"
+
+        # The procedure is at page-local line 2 of page 1.
+        # Page 0 has 7 lines, so global offset = 7 + 2 = 9.
+        proc = proc_bounds[0]
+        assert proc.page_number == 1
+        page0_line_count = len(xj_multipage_pages[0].split("\n"))
+        expected_global = page0_line_count + 2  # 7 + 2 = 9
+        assert proc.line_number == expected_global, (
+            f"Expected global line {expected_global}, got {proc.line_number}. "
+            f"line_number must be a global offset, not per-page."
+        )
+
+    def test_multipage_group_boundary_on_first_page(
+        self, xj_profile_path, xj_multipage_pages
+    ):
+        """Group boundary on page 0 should have line_number == 0 (global == local)."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(xj_multipage_pages, profile)
+
+        group_bounds = [b for b in boundaries if b.level == 1]
+        assert len(group_bounds) >= 1
+        assert group_bounds[0].line_number == 0, (
+            "Group boundary on page 0, line 0 should have global offset 0"
+        )
 
     def test_empty_pages_returns_empty(self, xj_profile_path):
         profile = load_profile(xj_profile_path)
@@ -247,3 +299,363 @@ class TestBuildManifest:
         profile = load_profile(xj_profile_path)
         manifest = build_manifest([], profile)
         assert manifest.entries == []
+
+
+# ── Three-Page Multi-Page Boundary Detection Tests ──────────────
+
+
+class TestThreePageBoundaryDetection:
+    """Verify boundary detection across 3-page manual content.
+
+    These tests use the ``three_page_manual_pages`` fixture which has:
+    - Page 0 (10 lines): group '7 Cooling System' + section 'SERVICE PROCEDURES'
+    - Page 1 (16 lines): procedure 'RADIATOR DRAINING AND REFILLING'
+    - Page 2 (14 lines): procedure 'THERMOSTAT - REMOVAL AND INSTALLATION'
+    """
+
+    def test_detects_all_boundary_levels(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Should detect group, section, and two procedure boundaries."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        group_bounds = [b for b in boundaries if b.level == 1]
+        section_bounds = [b for b in boundaries if b.level == 2]
+        proc_bounds = [b for b in boundaries if b.level == 3]
+
+        assert len(group_bounds) >= 1, "Must detect group boundary on page 0"
+        assert len(section_bounds) >= 1, "Must detect section boundary on page 0"
+        assert len(proc_bounds) >= 2, "Must detect procedure boundaries on pages 1 and 2"
+
+    def test_group_boundary_has_global_line_zero(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Group '7 Cooling System' is on page 0, line 0 => global offset 0."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        group_bounds = [b for b in boundaries if b.level == 1]
+        assert len(group_bounds) >= 1
+        assert group_bounds[0].page_number == 0
+        assert group_bounds[0].line_number == 0
+        assert group_bounds[0].id == "7"
+
+    def test_section_boundary_global_offset_page0(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """'SERVICE PROCEDURES' is on page 0, line 4 => global offset 4."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        section_bounds = [b for b in boundaries if b.level == 2]
+        assert len(section_bounds) >= 1
+        assert section_bounds[0].page_number == 0
+        assert section_bounds[0].line_number == 4
+
+    def test_page1_procedure_global_line_offset(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """'RADIATOR DRAINING AND REFILLING' is at page-local line 2 of page 1.
+
+        Page 0 has 10 lines, so global offset = 10 + 2 = 12.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        proc_bounds = [b for b in boundaries if b.level == 3]
+        assert len(proc_bounds) >= 1
+
+        radiator_proc = proc_bounds[0]
+        assert radiator_proc.page_number == 1
+
+        page0_lines = len(three_page_manual_pages[0].split("\n"))
+        expected_global = page0_lines + 2  # 10 + 2 = 12
+        assert radiator_proc.line_number == expected_global, (
+            f"Expected global line {expected_global}, got {radiator_proc.line_number}. "
+            f"Page 0 has {page0_lines} lines, procedure is at page-local line 2."
+        )
+
+    def test_page2_procedure_global_line_offset(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """'THERMOSTAT - REMOVAL AND INSTALLATION' is at page-local line 0 of page 2.
+
+        Page 0 has 10 lines, page 1 has 16 lines.
+        Global offset = 10 + 16 + 0 = 26.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        proc_bounds = [b for b in boundaries if b.level == 3]
+        assert len(proc_bounds) >= 2, "Must detect procedures on both page 1 and page 2"
+
+        thermostat_proc = proc_bounds[1]
+        assert thermostat_proc.page_number == 2
+
+        page0_lines = len(three_page_manual_pages[0].split("\n"))
+        page1_lines = len(three_page_manual_pages[1].split("\n"))
+        expected_global = page0_lines + page1_lines + 0  # 10 + 16 + 0 = 26
+        assert thermostat_proc.line_number == expected_global, (
+            f"Expected global line {expected_global}, got {thermostat_proc.line_number}. "
+            f"Page 0: {page0_lines} lines, Page 1: {page1_lines} lines."
+        )
+
+    def test_boundaries_sorted_by_page_then_line(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """All boundaries must be sorted by (page_number, line_number)."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+
+        for i in range(1, len(boundaries)):
+            prev = boundaries[i - 1]
+            curr = boundaries[i]
+            assert (curr.page_number, curr.line_number) >= (prev.page_number, prev.line_number), (
+                f"Boundary at index {i} ({curr.page_number}:{curr.line_number}) "
+                f"precedes boundary at index {i-1} ({prev.page_number}:{prev.line_number})"
+            )
+
+
+class TestThreePageManifest:
+    """Verify manifest built from 3-page boundaries has correct page ranges."""
+
+    def test_manifest_has_entries_for_all_boundaries(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+
+        assert len(manifest.entries) == len(boundaries), (
+            f"Manifest should have one entry per boundary: "
+            f"expected {len(boundaries)}, got {len(manifest.entries)}"
+        )
+
+    def test_manifest_entries_have_correct_page_numbers(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Each manifest entry's page_range.start should match its boundary's page."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+
+        for entry, boundary in zip(manifest.entries, boundaries):
+            assert entry.page_range.start == str(boundary.page_number), (
+                f"Entry '{entry.title}' page_range.start={entry.page_range.start} "
+                f"but boundary page_number={boundary.page_number}"
+            )
+
+    def test_manifest_hierarchy_path_depth(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Procedure entries should have 3-level hierarchy paths (group > section > procedure)."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+
+        proc_entries = [e for e in manifest.entries if e.level == 3]
+        for entry in proc_entries:
+            assert len(entry.hierarchy_path) == 3, (
+                f"Procedure '{entry.title}' hierarchy_path has "
+                f"{len(entry.hierarchy_path)} levels, expected 3: {entry.hierarchy_path}"
+            )
+
+    def test_procedure_entries_have_parent(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Procedure entries should have a parent_chunk_id pointing to the section."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+
+        proc_entries = [e for e in manifest.entries if e.level == 3]
+        for entry in proc_entries:
+            assert entry.parent_chunk_id is not None, (
+                f"Procedure '{entry.title}' should have a parent_chunk_id"
+            )
+            assert entry.parent_chunk_id.startswith("xj-1999::"), (
+                f"Parent chunk_id should start with 'xj-1999::'"
+            )
+
+
+class TestPageBoundaryEdgeCases:
+    """Test boundary detection when boundaries fall on page edges."""
+
+    def test_section_at_last_line_of_page(
+        self, xj_profile_path, page_boundary_edge_case_pages
+    ):
+        """A section boundary at the very last line of page 0 should be detected.
+
+        Page 0 has 5 lines (indices 0-4). 'SERVICE PROCEDURES' is at line 4.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(page_boundary_edge_case_pages, profile)
+
+        section_bounds = [b for b in boundaries if b.level == 2]
+        assert len(section_bounds) >= 1, (
+            "Must detect section boundary even at last line of page"
+        )
+        assert section_bounds[0].page_number == 0
+        assert section_bounds[0].line_number == 4
+
+    def test_section_at_last_line_global_offset_correct(
+        self, xj_profile_path, page_boundary_edge_case_pages
+    ):
+        """Boundary at last line of page 0 should have global offset = local offset."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(page_boundary_edge_case_pages, profile)
+
+        section_bounds = [b for b in boundaries if b.level == 2]
+        assert len(section_bounds) >= 1
+        # On page 0, global == local since there are no preceding pages
+        assert section_bounds[0].line_number == 4
+
+    def test_content_after_page_boundary_section(
+        self, xj_profile_path, page_boundary_edge_case_pages
+    ):
+        """Content on page 1 follows the section started at the end of page 0.
+
+        Build a manifest and verify the section entry's line range starts at
+        the correct global offset.
+        """
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(page_boundary_edge_case_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+
+        section_entries = [e for e in manifest.entries if e.level == 2]
+        assert len(section_entries) >= 1
+
+        # The section's line_range.start should be 4 (last line of page 0)
+        assert section_entries[0].line_range.start == 4
+
+
+# ── Manifest Persistence Tests ────────────────────────────────────
+
+
+class TestManifestPersistence:
+    """Test JSON serialization and deserialization of manifests."""
+
+    @pytest.fixture
+    def sample_manifest(self) -> Manifest:
+        """A manifest with representative entries for persistence testing."""
+        return Manifest(
+            manual_id="xj-1999",
+            entries=[
+                ManifestEntry(
+                    chunk_id="xj-1999::0",
+                    level=1,
+                    level_name="group",
+                    title="Lubrication and Maintenance",
+                    hierarchy_path=["Lubrication and Maintenance"],
+                    content_type="group",
+                    page_range=PageRange(start="0", end="12"),
+                    line_range=LineRange(start=0, end=450),
+                    vehicle_applicability=["Cherokee XJ"],
+                    engine_applicability=["all"],
+                    drivetrain_applicability=["all"],
+                    has_safety_callouts=["warning"],
+                    figure_references=["Fig. 1"],
+                    cross_references=["Group 8A"],
+                    parent_chunk_id=None,
+                    children=["xj-1999::0::SP"],
+                ),
+                ManifestEntry(
+                    chunk_id="xj-1999::0::SP",
+                    level=2,
+                    level_name="section",
+                    title="SERVICE PROCEDURES",
+                    hierarchy_path=["Lubrication and Maintenance", "SERVICE PROCEDURES"],
+                    content_type="section",
+                    page_range=PageRange(start="5", end="12"),
+                    line_range=LineRange(start=100, end=450),
+                    vehicle_applicability=["Cherokee XJ"],
+                    engine_applicability=["all"],
+                    drivetrain_applicability=["all"],
+                    has_safety_callouts=[],
+                    figure_references=[],
+                    cross_references=[],
+                    parent_chunk_id="xj-1999::0",
+                    children=[],
+                ),
+            ],
+        )
+
+    def test_save_creates_valid_json_file(self, tmp_path, sample_manifest):
+        out = tmp_path / "manifest.json"
+        save_manifest(sample_manifest, out)
+
+        assert out.exists()
+        # Must be parseable JSON
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+        assert "manual_id" in data
+        assert "entries" in data
+        assert len(data["entries"]) == 2
+
+    def test_load_reconstructs_manifest_with_correct_types(self, tmp_path, sample_manifest):
+        out = tmp_path / "manifest.json"
+        save_manifest(sample_manifest, out)
+
+        loaded = load_manifest(out)
+        assert isinstance(loaded, Manifest)
+        assert isinstance(loaded.entries[0], ManifestEntry)
+        assert isinstance(loaded.entries[0].page_range, PageRange)
+        assert isinstance(loaded.entries[0].line_range, LineRange)
+
+    def test_round_trip_preserves_all_fields(self, tmp_path, sample_manifest):
+        out = tmp_path / "manifest.json"
+        save_manifest(sample_manifest, out)
+        loaded = load_manifest(out)
+
+        assert loaded.manual_id == sample_manifest.manual_id
+        assert len(loaded.entries) == len(sample_manifest.entries)
+
+        for orig, restored in zip(sample_manifest.entries, loaded.entries):
+            assert restored.chunk_id == orig.chunk_id
+            assert restored.level == orig.level
+            assert restored.level_name == orig.level_name
+            assert restored.title == orig.title
+            assert restored.hierarchy_path == orig.hierarchy_path
+            assert restored.content_type == orig.content_type
+            assert restored.page_range.start == orig.page_range.start
+            assert restored.page_range.end == orig.page_range.end
+            assert restored.line_range.start == orig.line_range.start
+            assert restored.line_range.end == orig.line_range.end
+            assert restored.vehicle_applicability == orig.vehicle_applicability
+            assert restored.engine_applicability == orig.engine_applicability
+            assert restored.drivetrain_applicability == orig.drivetrain_applicability
+            assert restored.has_safety_callouts == orig.has_safety_callouts
+            assert restored.figure_references == orig.figure_references
+            assert restored.cross_references == orig.cross_references
+            assert restored.parent_chunk_id == orig.parent_chunk_id
+            assert restored.children == orig.children
+
+    def test_loaded_page_range_has_correct_types(self, tmp_path, sample_manifest):
+        out = tmp_path / "manifest.json"
+        save_manifest(sample_manifest, out)
+        loaded = load_manifest(out)
+
+        for entry in loaded.entries:
+            assert isinstance(entry.page_range, PageRange)
+            assert isinstance(entry.page_range.start, str)
+            assert isinstance(entry.page_range.end, str)
+
+    def test_loaded_line_range_has_correct_types(self, tmp_path, sample_manifest):
+        out = tmp_path / "manifest.json"
+        save_manifest(sample_manifest, out)
+        loaded = load_manifest(out)
+
+        for entry in loaded.entries:
+            assert isinstance(entry.line_range, LineRange)
+            assert isinstance(entry.line_range.start, int)
+            assert isinstance(entry.line_range.end, int)
+
+    def test_empty_manifest_round_trip(self, tmp_path):
+        manifest = Manifest(manual_id="empty-test", entries=[])
+        out = tmp_path / "empty.json"
+        save_manifest(manifest, out)
+        loaded = load_manifest(out)
+
+        assert loaded.manual_id == "empty-test"
+        assert loaded.entries == []

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .profile import ManualProfile
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,6 +26,20 @@ class Boundary:
 
 
 @dataclass
+class PageRange:
+    """Typed page range for a manifest entry."""
+    start: str
+    end: str
+
+
+@dataclass
+class LineRange:
+    """Typed line range for a manifest entry."""
+    start: int
+    end: int
+
+
+@dataclass
 class ManifestEntry:
     """A single entry in the hierarchical manifest."""
     chunk_id: str
@@ -29,8 +48,8 @@ class ManifestEntry:
     title: str
     hierarchy_path: list[str]
     content_type: str
-    page_range: dict[str, str]
-    line_range: dict[str, int]
+    page_range: PageRange
+    line_range: LineRange
     vehicle_applicability: list[str]
     engine_applicability: list[str]
     drivetrain_applicability: list[str]
@@ -61,6 +80,7 @@ def detect_boundaries(
         Ordered list of detected boundaries, sorted by page_number then line_number.
     """
     boundaries: list[Boundary] = []
+    logger.debug("Scanning %d pages for structural boundaries", len(pages))
 
     # Pre-compile patterns for each hierarchy level
     compiled_levels: list[
@@ -75,6 +95,12 @@ def detect_boundaries(
     # When a line matches multiple hierarchy levels, we pick the shallowest
     # level that is deeper than any already-open level of the same pattern.
     current_level = 0  # deepest hierarchy level currently active
+
+    # Running offset so that line_number is a global (absolute) index into the
+    # concatenated page stream (i.e. "\n".join(pages).split("\n")).  Without
+    # this, assemble_chunks() — which joins all pages and indexes by
+    # line_number — would extract the wrong text for page 2+.
+    global_line_offset = 0
 
     for page_idx, page_text in enumerate(pages):
         lines = page_text.split("\n")
@@ -125,12 +151,16 @@ def detect_boundaries(
                     id=boundary_id,
                     title=boundary_title,
                     page_number=page_idx,
-                    line_number=line_idx,
+                    line_number=global_line_offset + line_idx,
                 )
             )
 
+        # Advance the global offset by the number of lines in this page
+        global_line_offset += len(lines)
+
     # Sort by page_number, then line_number
     boundaries.sort(key=lambda b: (b.page_number, b.line_number))
+    logger.debug("Detected %d boundaries across %d pages", len(boundaries), len(pages))
     return boundaries
 
 
@@ -233,8 +263,8 @@ def build_manifest(
             title=boundary_title_str,
             hierarchy_path=hierarchy_path,
             content_type=boundary.level_name,
-            page_range={"start": str(boundary.page_number), "end": str(boundary.page_number)},
-            line_range={"start": boundary.line_number, "end": boundary.line_number},
+            page_range=PageRange(start=str(boundary.page_number), end=str(boundary.page_number)),
+            line_range=LineRange(start=boundary.line_number, end=boundary.line_number),
             vehicle_applicability=vehicle_names,
             engine_applicability=["all"],
             drivetrain_applicability=["all"],
@@ -269,3 +299,43 @@ def generate_chunk_id(manual_id: str, hierarchy_ids: list[str]) -> str:
     if not hierarchy_ids:
         return manual_id
     return "::".join([manual_id] + hierarchy_ids)
+
+
+def save_manifest(manifest: Manifest, path: Path) -> None:
+    """Serialize a Manifest to a JSON file.
+
+    Uses dataclasses.asdict() for full recursive conversion, then writes
+    indented JSON for readability and diffability.
+
+    Args:
+        manifest: The Manifest object to persist.
+        path: Filesystem path for the output JSON file.
+    """
+    data = asdict(manifest)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    logger.debug("Saved manifest with %d entries to %s", len(manifest.entries), path)
+
+
+def load_manifest(path: Path) -> Manifest:
+    """Deserialize a Manifest from a JSON file.
+
+    Reconstructs fully-typed dataclass instances (Manifest, ManifestEntry,
+    PageRange, LineRange) from the plain-dict JSON representation.
+
+    Args:
+        path: Filesystem path to a manifest JSON file.
+
+    Returns:
+        A Manifest with properly typed ManifestEntry objects.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    entries = []
+    for entry_dict in data["entries"]:
+        entry_dict["page_range"] = PageRange(**entry_dict["page_range"])
+        entry_dict["line_range"] = LineRange(**entry_dict["line_range"])
+        entries.append(ManifestEntry(**entry_dict))
+
+    return Manifest(manual_id=data["manual_id"], entries=entries)

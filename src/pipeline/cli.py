@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12,6 +15,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pipeline",
         description="Smart Chunking Pipeline for Vehicle Service Manual RAG",
+    )
+
+    # Global logging verbosity flags
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable debug logging output",
+    )
+    verbosity.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress all output except warnings and errors",
     )
 
     subparsers = parser.add_subparsers(dest="command")
@@ -27,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     process_parser.add_argument(
         "--pdf", required=True, help="Path to the PDF manual file"
+    )
+    process_parser.add_argument(
+        "--output-dir",
+        required=False,
+        default=None,
+        help="Directory to write {manual_id}_chunks.jsonl output",
     )
 
     # bootstrap-profile subcommand
@@ -65,6 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-set", required=True, help="Path to the test set JSON file"
     )
 
+    # validate-chunks subcommand
+    validate_chunks_parser = subparsers.add_parser(
+        "validate-chunks",
+        help="Run offline QA checks on a saved chunks JSONL file",
+    )
+    validate_chunks_parser.add_argument(
+        "--chunks", required=True, help="Path to a chunks JSONL file (produced by save_chunks)"
+    )
+    validate_chunks_parser.add_argument(
+        "--profile", required=True, help="Path to the YAML profile file"
+    )
+
     return parser
 
 
@@ -77,11 +109,11 @@ def cmd_process(args: argparse.Namespace) -> int:
     pdf_path = Path(args.pdf)
 
     if not profile_path.exists():
-        print(f"Error: Profile file not found: {profile_path}", file=sys.stderr)
+        logger.error("Profile file not found: %s", profile_path)
         return 1
 
     if not pdf_path.exists():
-        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
+        logger.error("PDF file not found: %s", pdf_path)
         return 1
 
     # Imports inside function to avoid circular imports
@@ -89,38 +121,45 @@ def cmd_process(args: argparse.Namespace) -> int:
     from . import extract_pages
     from .ocr_cleanup import clean_page
     from .structural_parser import detect_boundaries, build_manifest
-    from .chunk_assembly import assemble_chunks
+    from .chunk_assembly import assemble_chunks, save_chunks
 
     # 1. Load and validate profile
     profile = load_profile(profile_path)
     errors = validate_profile(profile)
     if errors:
         for err in errors:
-            print(f"  Profile error: {err}", file=sys.stderr)
+            logger.error("Profile error: %s", err)
         return 1
-    print(f"Profile loaded: {profile.manual_id}")
+    logger.info("Profile loaded: %s", profile.manual_id)
 
     # 2. Extract pages from PDF
     pages = extract_pages(pdf_path)
-    print(f"Extracted {len(pages)} pages from PDF")
+    logger.info("Extracted %d pages from PDF", len(pages))
 
     # 3. OCR cleanup per page
     cleaned = [clean_page(p, i, profile) for i, p in enumerate(pages)]
     cleaned_texts = [c.cleaned_text for c in cleaned]
-    print(f"Cleaned {len(cleaned)} pages")
+    logger.info("Cleaned %d pages", len(cleaned))
 
     # 4. Detect boundaries and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
     manifest = build_manifest(boundaries, profile)
-    print(f"Detected {len(boundaries)} boundaries, {len(manifest.entries)} manifest entries")
+    logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
     # 5. Assemble chunks
     chunks = assemble_chunks(cleaned_texts, manifest, profile)
-    print(f"Assembled {len(chunks)} chunks")
+    logger.info("Assembled %d chunks", len(chunks))
+
+    # 5b. Write chunks to JSONL if --output-dir was provided
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+        output_path = output_dir / f"{profile.manual_id}_chunks.jsonl"
+        save_chunks(chunks, output_path)
+        logger.info("Wrote %d chunks to %s", len(chunks), output_path)
 
     # 6. Indexing requires running Qdrant + Ollama — skip with message
-    print("\nSkipping embedding/indexing (requires running Qdrant and Ollama).")
-    print("To index, start Qdrant and Ollama, then use the Python API directly.")
+    logger.info("Skipping embedding/indexing (requires running Qdrant and Ollama).")
+    logger.info("To index, start Qdrant and Ollama, then use the Python API directly.")
 
     return 0
 
@@ -133,11 +172,11 @@ def cmd_bootstrap_profile(args: argparse.Namespace) -> int:
     pdf_path = Path(args.pdf)
 
     if not pdf_path.exists():
-        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
+        logger.error("PDF file not found: %s", pdf_path)
         return 1
 
-    # TODO: Implement bootstrap profile logic
-    return 0
+    logger.error("bootstrap-profile is not yet implemented.")
+    return 1
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -149,11 +188,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     pdf_path = Path(args.pdf)
 
     if not profile_path.exists():
-        print(f"Error: Profile file not found: {profile_path}", file=sys.stderr)
+        logger.error("Profile file not found: %s", profile_path)
         return 1
 
     if not pdf_path.exists():
-        print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
+        logger.error("PDF file not found: %s", pdf_path)
         return 1
 
     # Imports inside function to avoid circular imports
@@ -169,46 +208,95 @@ def cmd_validate(args: argparse.Namespace) -> int:
     errors = validate_profile(profile)
     if errors:
         for err in errors:
-            print(f"  Profile error: {err}", file=sys.stderr)
+            logger.error("Profile error: %s", err)
         return 1
-    print(f"Profile loaded: {profile.manual_id}")
+    logger.info("Profile loaded: %s", profile.manual_id)
 
     # 2. Extract pages from PDF
     pages = extract_pages(pdf_path)
-    print(f"Extracted {len(pages)} pages from PDF")
+    logger.info("Extracted %d pages from PDF", len(pages))
 
     # 3. OCR cleanup per page
     cleaned = [clean_page(p, i, profile) for i, p in enumerate(pages)]
     cleaned_texts = [c.cleaned_text for c in cleaned]
-    print(f"Cleaned {len(cleaned)} pages")
+    logger.info("Cleaned %d pages", len(cleaned))
 
     # 4. Detect boundaries and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
     manifest = build_manifest(boundaries, profile)
-    print(f"Detected {len(boundaries)} boundaries, {len(manifest.entries)} manifest entries")
+    logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
     # 5. Validate boundaries against profile known_ids
     boundary_warnings = validate_boundaries(boundaries, profile)
     if boundary_warnings:
-        print(f"\nBoundary warnings ({len(boundary_warnings)}):")
+        logger.warning("Boundary warnings (%d):", len(boundary_warnings))
         for w in boundary_warnings:
-            print(f"  {w}")
+            logger.warning("  %s", w)
 
     # 6. Assemble chunks
     chunks = assemble_chunks(cleaned_texts, manifest, profile)
-    print(f"Assembled {len(chunks)} chunks")
+    logger.info("Assembled %d chunks", len(chunks))
 
     # 7. Run QA validation suite
     report = run_validation_suite(chunks, profile)
-    print(f"\nValidation: {len(report.checks_run)} checks run on {report.total_chunks} chunks")
-    print(f"  Errors:   {report.error_count}")
-    print(f"  Warnings: {report.warning_count}")
-    print(f"  Passed:   {report.passed}")
+    logger.info("Validation: %d checks run on %d chunks", len(report.checks_run), report.total_chunks)
+    logger.info("  Errors:   %d", report.error_count)
+    logger.info("  Warnings: %d", report.warning_count)
+    logger.info("  Passed:   %s", report.passed)
 
     if report.issues:
-        print("\nIssues:")
+        logger.info("Issues:")
         for issue in report.issues:
-            print(f"  [{issue.severity}] {issue.check}: {issue.message} (chunk: {issue.chunk_id})")
+            logger.info("  [%s] %s: %s (chunk: %s)", issue.severity, issue.check, issue.message, issue.chunk_id)
+
+    return 0 if report.passed else 1
+
+
+def cmd_validate_chunks(args: argparse.Namespace) -> int:
+    """Run offline QA checks on a saved chunks JSONL file.
+
+    Returns exit code (0 = success, 1 = validation errors found or input error).
+    """
+    chunks_path = Path(args.chunks)
+    profile_path = Path(args.profile)
+
+    if not chunks_path.exists():
+        logger.error("Chunks file not found: %s", chunks_path)
+        return 1
+
+    if not profile_path.exists():
+        logger.error("Profile file not found: %s", profile_path)
+        return 1
+
+    # Imports inside function to avoid circular imports
+    from .profile import load_profile, validate_profile
+    from .chunk_assembly import load_chunks
+    from .qa import run_validation_suite
+
+    # 1. Load and validate profile
+    profile = load_profile(profile_path)
+    errors = validate_profile(profile)
+    if errors:
+        for err in errors:
+            logger.error("Profile error: %s", err)
+        return 1
+    logger.info("Profile loaded: %s", profile.manual_id)
+
+    # 2. Load chunks from JSONL
+    chunks = load_chunks(chunks_path)
+    logger.info("Loaded %d chunks from %s", len(chunks), chunks_path)
+
+    # 3. Run QA validation suite
+    report = run_validation_suite(chunks, profile)
+    logger.info("Validation: %d checks run on %d chunks", len(report.checks_run), report.total_chunks)
+    logger.info("  Errors:   %d", report.error_count)
+    logger.info("  Warnings: %d", report.warning_count)
+    logger.info("  Passed:   %s", report.passed)
+
+    if report.issues:
+        logger.info("Issues:")
+        for issue in report.issues:
+            logger.info("  [%s] %s: %s (chunk: %s)", issue.severity, issue.check, issue.message, issue.chunk_id)
 
     return 0 if report.passed else 1
 
@@ -218,8 +306,8 @@ def cmd_qa(args: argparse.Namespace) -> int:
 
     Returns exit code (0 = success).
     """
-    print("Error: QA checks require a running Qdrant instance and indexed data.", file=sys.stderr)
-    print("Index a manual first with 'pipeline process', then run QA.", file=sys.stderr)
+    logger.error("QA checks require a running Qdrant instance and indexed data.")
+    logger.error("Index a manual first with 'pipeline process', then run QA.")
     return 1
 
 
@@ -233,10 +321,24 @@ def main(argv: list[str] | None = None) -> int:
         # Return the exit code from argparse (0 for --help, 2 for errors)
         return e.code if isinstance(e.code, int) else 1
 
+    # Configure root logger based on verbosity flags
+    if getattr(args, "verbose", False):
+        log_level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        log_level = logging.WARNING
+    else:
+        log_level = logging.INFO
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(levelname)s: %(message)s",
+    )
+
     command_handlers = {
         "process": cmd_process,
         "bootstrap-profile": cmd_bootstrap_profile,
         "validate": cmd_validate,
+        "validate-chunks": cmd_validate_chunks,
         "qa": cmd_qa,
     }
 
@@ -248,5 +350,5 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return handler(args)
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error("%s", e)
         return 1

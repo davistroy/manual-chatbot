@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import sqlite3
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,6 +41,7 @@ class RetrievalResponse:
     results: list[RetrievalResult]
     has_safety_warnings: bool = False
     multi_manual: bool = False
+    retrieval_warnings: list[str] = field(default_factory=list)
 
 
 # ── Vehicle / engine / drivetrain detection patterns ──────────────
@@ -193,6 +199,11 @@ def analyze_query(query: str, available_manuals: list[str]) -> QueryAnalysis:
     if len(available_manuals) == 1:
         manual_id_filter = available_manuals[0]
 
+    logger.debug(
+        "Query analysis: type=%s, vehicles=%s, systems=%s",
+        query_type, vehicle_scope, system_scope,
+    )
+
     return QueryAnalysis(
         original_query=query,
         vehicle_scope=vehicle_scope,
@@ -302,8 +313,6 @@ def resolve_cross_references(
     When sqlite_db_path is provided, looks up cross-reference targets in the
     SQLite secondary index and adds them as additional results.
     """
-    import sqlite3
-
     enriched = list(results)
 
     if sqlite_db_path is None:
@@ -351,8 +360,9 @@ def resolve_cross_references(
                     existing_ids.add(chunk_id)
 
         conn.close()
-    except sqlite3.Error:
-        pass  # Graceful degradation — return what we have
+    except sqlite3.Error as e:
+        warnings.warn(f"Cross-reference resolution failed: {e}")
+        # Graceful degradation — return what we have
 
     return enriched
 
@@ -391,6 +401,8 @@ def retrieve(
     5. Re-rank -> top-3 to top-5
     """
     from .embeddings import generate_embedding
+
+    logger.debug("Retrieving top-%d results for query type '%s'", top_k, query.query_type)
 
     # Step 1: Generate query embedding and search
     query_vector = generate_embedding(query.original_query)
@@ -437,8 +449,13 @@ def retrieve(
     # Step 3: Sibling-chunk enrichment
     enriched = enrich_with_siblings(enriched)
 
-    # Step 4: Cross-reference resolution
-    enriched = resolve_cross_references(enriched, sqlite_db_path=sqlite_db_path)
+    # Step 4: Cross-reference resolution (capture warnings for response)
+    retrieval_warnings: list[str] = []
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        enriched = resolve_cross_references(enriched, sqlite_db_path=sqlite_db_path)
+        for w in caught_warnings:
+            retrieval_warnings.append(str(w.message))
 
     # Step 5: Re-rank and return top results
     final_results = rerank(enriched, top_n=min(top_k, 5))
@@ -454,4 +471,5 @@ def retrieve(
         results=final_results,
         has_safety_warnings=has_safety,
         multi_manual=query.manual_id_filter is None,
+        retrieval_warnings=retrieval_warnings,
     )
