@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from pipeline.chunk_assembly import (
@@ -21,12 +23,16 @@ from pipeline.chunk_assembly import (
     detect_safety_callouts,
     detect_step_sequences,
     detect_tables,
+    load_chunks,
+    save_chunks,
     tag_vehicle_applicability,
 )
 from pipeline.profile import SafetyCallout, load_profile
 from pipeline.structural_parser import (
+    LineRange,
     Manifest,
     ManifestEntry,
+    PageRange,
     build_manifest,
     detect_boundaries,
 )
@@ -324,6 +330,76 @@ class TestRuleR5TableIntegrity:
         # Even if over 2000 tokens, table stays whole
         assert len(result) == 1
 
+    def test_split_table_gets_merged(self):
+        """A table split across two chunks should be reassembled."""
+        chunk_a = (
+            "SPECIFICATIONS\n"
+            "Engine Oil Capacity:\n"
+            "  2.5L I4 .............. 4 quarts\n"
+            "  4.0L I6 .............. 6 quarts"
+        )
+        chunk_b = (
+            "Coolant Capacity:\n"
+            "  2.5L I4 .............. 9.0 quarts\n"
+            "  4.0L I6 .............. 10.0 quarts\n"
+            "Oil Pressure (hot idle) ... 13 psi minimum"
+        )
+        result = apply_rule_r5_table_integrity([chunk_a, chunk_b])
+        assert len(result) == 1, "Split table should be merged into one chunk"
+        assert "2.5L I4" in result[0]
+        assert "Coolant Capacity" in result[0]
+        assert "Oil Pressure" in result[0]
+
+    def test_split_table_three_chunks_merged(self):
+        """A table split across three chunks should still be reassembled."""
+        chunk_a = (
+            "SPECIFICATIONS\n"
+            "Item A .............. Value A"
+        )
+        chunk_b = "Item B .............. Value B"
+        chunk_c = "Item C .............. Value C"
+        result = apply_rule_r5_table_integrity([chunk_a, chunk_b, chunk_c])
+        assert len(result) == 1, "Three-way split table should merge into one chunk"
+        assert "Item A" in result[0]
+        assert "Item B" in result[0]
+        assert "Item C" in result[0]
+
+    def test_no_merge_when_next_chunk_is_prose(self):
+        """A table chunk followed by a prose chunk should not be merged."""
+        table_chunk = (
+            "SPECIFICATIONS\n"
+            "Oil Capacity .............. 6 quarts"
+        )
+        prose_chunk = "After servicing, start the engine and check for leaks."
+        result = apply_rule_r5_table_integrity([table_chunk, prose_chunk])
+        assert len(result) == 2, "Table followed by prose should NOT merge"
+
+    def test_no_merge_when_current_chunk_is_prose(self):
+        """A prose chunk followed by a table chunk should not be merged."""
+        prose_chunk = "Remove the drain plug and allow oil to drain."
+        table_chunk = (
+            "SPECIFICATIONS\n"
+            "Oil Capacity .............. 6 quarts"
+        )
+        result = apply_rule_r5_table_integrity([prose_chunk, table_chunk])
+        assert len(result) == 2, "Prose followed by table should NOT merge"
+
+    def test_non_triggering_input_unchanged(self):
+        """Chunks without table content pass through unchanged."""
+        chunks = [
+            "First paragraph of regular text.",
+            "Second paragraph of regular text.",
+        ]
+        result = apply_rule_r5_table_integrity(chunks)
+        assert result == chunks
+
+    def test_single_chunk_unchanged(self):
+        """A single chunk (even with a table) should pass through."""
+        single = "SPECIFICATIONS\nItem A .............. Value A"
+        result = apply_rule_r5_table_integrity([single])
+        assert len(result) == 1
+        assert result[0] == single
+
 
 # ── Rule R6: Merge Small Chunks ───────────────────────────────────
 
@@ -380,11 +456,72 @@ class TestRuleR8FigureContinuity:
             "Remove the bolt as shown (Fig. 1).",
             "Install the new gasket.",
         ]
-        result = apply_rule_r8_figure_continuity(chunks, r"\(Fig\.\s+\d+\)")
+        result = apply_rule_r8_figure_continuity(chunks, r"\(Fig\.\s+(\d+)\)")
         # Fig. 1 reference should stay with its describing text
         for chunk in result:
             if "(Fig. 1)" in chunk:
                 assert "bolt" in chunk
+
+    def test_orphaned_figure_ref_merged_back(self):
+        """A figure caption orphaned into its own chunk merges into the previous chunk."""
+        chunk_a = "Connect the negative cable to the engine ground (Fig. 1)."
+        chunk_b = "(Fig. 1) — Battery Jump Starting Connections"
+        result = apply_rule_r8_figure_continuity(
+            [chunk_a, chunk_b], r"\(Fig\.\s+(\d+)\)"
+        )
+        assert len(result) == 1, "Orphaned figure ref should merge into previous"
+        assert "engine ground" in result[0]
+        assert "Battery Jump Starting" in result[0]
+
+    def test_orphaned_figure_ref_cj_style(self):
+        """CJ-style figure references (FIG. B-1) merge correctly."""
+        chunk_a = (
+            "The engine oil lubricates all internal moving parts.\n"
+            "See FIG. B-1 for the lubrication system diagram."
+        )
+        chunk_b = "FIG. B-1 — Engine Lubrication System Diagram"
+        result = apply_rule_r8_figure_continuity(
+            [chunk_a, chunk_b], r"FIG\.\s+([A-Z]\d?-\d+)"
+        )
+        assert len(result) == 1, "CJ-style orphaned figure should merge"
+        assert "internal moving parts" in result[0]
+        assert "FIG. B-1" in result[0]
+
+    def test_no_merge_when_figure_ids_differ(self):
+        """Chunks referencing different figures should NOT merge."""
+        chunk_a = "Remove the bolt as shown (Fig. 1)."
+        chunk_b = "(Fig. 2) — Transmission Assembly Diagram"
+        result = apply_rule_r8_figure_continuity(
+            [chunk_a, chunk_b], r"\(Fig\.\s+(\d+)\)"
+        )
+        assert len(result) == 2, "Different figure IDs should NOT merge"
+
+    def test_no_merge_when_previous_has_no_figure_ref(self):
+        """A chunk starting with a figure ref but no matching ref in previous stays separate."""
+        chunk_a = "Regular text without any figure reference."
+        chunk_b = "(Fig. 3) — Cooling System Diagram"
+        result = apply_rule_r8_figure_continuity(
+            [chunk_a, chunk_b], r"\(Fig\.\s+(\d+)\)"
+        )
+        assert len(result) == 2, "No figure ref in previous should NOT trigger merge"
+
+    def test_non_triggering_input_unchanged(self):
+        """Chunks without figure references pass through unchanged."""
+        chunks = [
+            "First paragraph of regular text.",
+            "Second paragraph of regular text.",
+        ]
+        result = apply_rule_r8_figure_continuity(chunks, r"\(Fig\.\s+(\d+)\)")
+        assert result == chunks
+
+    def test_first_chunk_with_figure_not_merged(self):
+        """The first chunk cannot merge backward — it should stay as-is."""
+        chunks = [
+            "(Fig. 1) — Battery Connections Diagram",
+            "Some following content.",
+        ]
+        result = apply_rule_r8_figure_continuity(chunks, r"\(Fig\.\s+(\d+)\)")
+        assert len(result) == 2, "First chunk with figure ref has nothing to merge into"
 
 
 # ── Vehicle Applicability Tagging Tests ───────────────────────────
@@ -457,8 +594,8 @@ class TestRuleOrdering:
             title="Test Procedure",
             hierarchy_path=["Test Group", "Test Section", "Test Procedure"],
             content_type="procedure",
-            page_range={"start": "1", "end": "1"},
-            line_range={"start": 0, "end": num_lines},
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=0, end=num_lines),
             vehicle_applicability=["all"],
             engine_applicability=["all"],
             drivetrain_applicability=["all"],
@@ -568,8 +705,8 @@ class TestMetadataContract:
                 "Jump Starting Procedure",
             ],
             content_type="procedure",
-            page_range={"start": "1", "end": "1"},
-            line_range={"start": 0, "end": num_lines},
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=0, end=num_lines),
             vehicle_applicability=["all"],
             engine_applicability=["all"],
             drivetrain_applicability=["all"],
@@ -633,8 +770,8 @@ class TestMetadataContract:
             title="Cooling System",
             hierarchy_path=["8A Cooling System", "Cooling System"],
             content_type="section",
-            page_range={"start": "1", "end": "1"},
-            line_range={"start": 0, "end": len(page_text.split("\n"))},
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=0, end=len(page_text.split("\n"))),
             vehicle_applicability=["all"],
             engine_applicability=["all"],
             drivetrain_applicability=["all"],
@@ -729,3 +866,239 @@ class TestMultiPageAssembly:
                 # It should NOT also start with "Introduction to maintenance"
                 # (which would indicate wrong offset extraction).
                 pass  # Verified by the positive assertion above
+
+
+# ── Chunk Persistence (JSONL) Tests ──────────────────────────────
+
+
+class TestSaveChunks:
+    """Test JSONL export of chunks."""
+
+    def _make_chunks(self) -> list[Chunk]:
+        """Create sample chunks for persistence testing."""
+        return [
+            Chunk(
+                chunk_id="manual-1::sec1::proc1",
+                manual_id="manual-1",
+                text="(1) First step.\n(2) Second step.",
+                metadata={
+                    "manual_id": "manual-1",
+                    "level1_id": "sec1",
+                    "procedure_name": "Test Procedure",
+                    "hierarchical_header": "Manual 1 | Section 1 | Test Procedure",
+                    "hierarchy_path": ["Section 1", "Test Procedure"],
+                    "content_type": "procedure",
+                    "page_range": {"start": "1", "end": "2"},
+                    "vehicle_models": ["all"],
+                    "engine_applicability": ["all"],
+                    "drivetrain_applicability": ["all"],
+                    "has_safety_callouts": [],
+                    "figure_references": [],
+                    "cross_references": [],
+                },
+            ),
+            Chunk(
+                chunk_id="manual-1::sec2::proc2",
+                manual_id="manual-1",
+                text="WARNING: Safety first.\n(1) Do the thing.",
+                metadata={
+                    "manual_id": "manual-1",
+                    "level1_id": "sec2",
+                    "procedure_name": "Another Procedure",
+                    "hierarchical_header": "Manual 1 | Section 2 | Another Procedure",
+                    "hierarchy_path": ["Section 2", "Another Procedure"],
+                    "content_type": "procedure",
+                    "page_range": {"start": "3", "end": "3"},
+                    "vehicle_models": ["Model-A"],
+                    "engine_applicability": ["4.0L I6"],
+                    "drivetrain_applicability": ["4WD"],
+                    "has_safety_callouts": ["warning"],
+                    "figure_references": ["Fig. 1"],
+                    "cross_references": ["Group 5"],
+                },
+            ),
+        ]
+
+    def test_creates_file(self, tmp_path):
+        chunks = self._make_chunks()
+        output = tmp_path / "chunks.jsonl"
+        save_chunks(chunks, output)
+        assert output.exists()
+
+    def test_writes_one_line_per_chunk(self, tmp_path):
+        chunks = self._make_chunks()
+        output = tmp_path / "chunks.jsonl"
+        save_chunks(chunks, output)
+        lines = output.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == len(chunks)
+
+    def test_each_line_is_valid_json(self, tmp_path):
+        import json
+
+        chunks = self._make_chunks()
+        output = tmp_path / "chunks.jsonl"
+        save_chunks(chunks, output)
+        lines = output.read_text(encoding="utf-8").strip().split("\n")
+        for line in lines:
+            record = json.loads(line)
+            assert "chunk_id" in record
+            assert "manual_id" in record
+            assert "text" in record
+            assert "metadata" in record
+
+    def test_creates_parent_directories(self, tmp_path):
+        chunks = self._make_chunks()
+        output = tmp_path / "nested" / "dir" / "chunks.jsonl"
+        save_chunks(chunks, output)
+        assert output.exists()
+
+    def test_empty_chunks_creates_empty_file(self, tmp_path):
+        output = tmp_path / "empty.jsonl"
+        save_chunks([], output)
+        assert output.exists()
+        assert output.read_text(encoding="utf-8") == ""
+
+
+class TestLoadChunks:
+    """Test JSONL import of chunks."""
+
+    def test_loads_chunk_objects(self, tmp_path):
+        import json
+
+        output = tmp_path / "chunks.jsonl"
+        record = {
+            "chunk_id": "m1::s1",
+            "manual_id": "m1",
+            "text": "Hello world.",
+            "metadata": {"manual_id": "m1", "level1_id": "s1"},
+        }
+        output.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        loaded = load_chunks(output)
+        assert len(loaded) == 1
+        assert isinstance(loaded[0], Chunk)
+        assert loaded[0].chunk_id == "m1::s1"
+        assert loaded[0].manual_id == "m1"
+        assert loaded[0].text == "Hello world."
+        assert loaded[0].metadata["level1_id"] == "s1"
+
+    def test_empty_file_returns_empty_list(self, tmp_path):
+        output = tmp_path / "empty.jsonl"
+        output.write_text("", encoding="utf-8")
+        loaded = load_chunks(output)
+        assert loaded == []
+
+    def test_skips_blank_lines(self, tmp_path):
+        import json
+
+        output = tmp_path / "chunks.jsonl"
+        record = {
+            "chunk_id": "m1::s1",
+            "manual_id": "m1",
+            "text": "Hello.",
+            "metadata": {},
+        }
+        content = json.dumps(record) + "\n\n" + json.dumps(record) + "\n"
+        output.write_text(content, encoding="utf-8")
+        loaded = load_chunks(output)
+        assert len(loaded) == 2
+
+
+class TestChunkPersistenceRoundTrip:
+    """Test save -> load round-trip preserves chunk data exactly."""
+
+    def _make_chunks(self) -> list[Chunk]:
+        """Create sample chunks with varied metadata for round-trip testing."""
+        return [
+            Chunk(
+                chunk_id="xj-1999::0::SP::JSP",
+                manual_id="xj-1999",
+                text="(1) Connect positive cable.\n(2) Connect negative cable.",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "0",
+                    "procedure_name": "Jump Starting Procedure",
+                    "hierarchical_header": "1999 Jeep Cherokee | Lubrication | Jump Starting",
+                    "hierarchy_path": ["Lubrication", "Service Procedures", "Jump Starting"],
+                    "content_type": "procedure",
+                    "page_range": {"start": "9", "end": "10"},
+                    "vehicle_models": ["Cherokee XJ"],
+                    "engine_applicability": ["4.0L I6"],
+                    "drivetrain_applicability": ["4WD"],
+                    "has_safety_callouts": ["warning", "caution"],
+                    "figure_references": ["Fig. 1"],
+                    "cross_references": ["Group 8A"],
+                },
+            ),
+            Chunk(
+                chunk_id="xj-1999::8A::cooling::part1",
+                manual_id="xj-1999",
+                text="The cooling system maintains engine operating temperature.",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "8A",
+                    "procedure_name": "Cooling System",
+                    "hierarchical_header": "1999 Jeep Cherokee | 8A Cooling",
+                    "hierarchy_path": ["8A Cooling", "Cooling System"],
+                    "content_type": "section",
+                    "page_range": {"start": "1", "end": "5"},
+                    "vehicle_models": ["all"],
+                    "engine_applicability": ["all"],
+                    "drivetrain_applicability": ["all"],
+                    "has_safety_callouts": [],
+                    "figure_references": [],
+                    "cross_references": [],
+                },
+            ),
+        ]
+
+    def test_round_trip_preserves_chunk_count(self, tmp_path):
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        assert len(loaded) == len(original)
+
+    def test_round_trip_preserves_chunk_ids(self, tmp_path):
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        for orig, load in zip(original, loaded):
+            assert load.chunk_id == orig.chunk_id
+
+    def test_round_trip_preserves_manual_ids(self, tmp_path):
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        for orig, load in zip(original, loaded):
+            assert load.manual_id == orig.manual_id
+
+    def test_round_trip_preserves_text(self, tmp_path):
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        for orig, load in zip(original, loaded):
+            assert load.text == orig.text
+
+    def test_round_trip_preserves_metadata(self, tmp_path):
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        for orig, load in zip(original, loaded):
+            assert load.metadata == orig.metadata
+
+    def test_round_trip_full_equality(self, tmp_path):
+        """Complete equality check: all fields of every chunk match after round-trip."""
+        original = self._make_chunks()
+        path = tmp_path / "roundtrip.jsonl"
+        save_chunks(original, path)
+        loaded = load_chunks(path)
+        assert len(loaded) == len(original)
+        for orig, load in zip(original, loaded):
+            assert load.chunk_id == orig.chunk_id
+            assert load.manual_id == orig.manual_id
+            assert load.text == orig.text
+            assert load.metadata == orig.metadata

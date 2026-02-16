@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
 from .profile import ManualProfile
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -184,6 +187,11 @@ def clean_page(page_text: str, page_number: int, profile: ManualProfile) -> Clea
 
     # 4. Universal normalization
     text = normalize_unicode(text)
+
+    logger.debug(
+        "Page %d cleanup: %d substitutions, %d garbage lines",
+        page_number, sub_count, len(garbage_lines),
+    )
 
     return CleanedPage(
         page_number=page_number,

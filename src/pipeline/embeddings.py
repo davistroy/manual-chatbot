@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 import uuid
@@ -11,6 +12,8 @@ from typing import Any
 import requests
 
 from .chunk_assembly import Chunk
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -88,6 +91,7 @@ def generate_embedding(
             if attempt < max_attempts - 1:
                 time.sleep(2 ** attempt)
 
+    logger.debug("Embedding generation failed after %d attempts: %s", max_attempts, last_error)
     raise RuntimeError(f"Embedding generation failed after {max_attempts} attempts: {last_error}")
 
 
@@ -121,6 +125,7 @@ def index_chunks(
     """
     from qdrant_client.models import PointStruct
 
+    logger.debug("Indexing %d chunks into collection '%s'", len(chunks), collection_name)
     points = []
     for i, chunk in enumerate(chunks):
         # Compose embedding input

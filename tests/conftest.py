@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.structural_parser import LineRange, PageRange
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
@@ -270,8 +272,8 @@ def sample_manifest_entry() -> dict:
             "Jump Starting Procedure",
         ],
         "content_type": "procedure",
-        "page_range": {"start": "0-9", "end": "0-10"},
-        "line_range": {"start": 1842, "end": 1923},
+        "page_range": PageRange(start="0-9", end="0-10"),
+        "line_range": LineRange(start=1842, end=1923),
         "vehicle_applicability": ["Cherokee XJ"],
         "engine_applicability": ["all"],
         "drivetrain_applicability": ["all"],

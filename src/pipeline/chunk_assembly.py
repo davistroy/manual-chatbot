@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .profile import ManualProfile
 from .structural_parser import Manifest, ManifestEntry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -414,12 +419,74 @@ def apply_rule_r4_safety_attachment(
 
 
 def apply_rule_r5_table_integrity(chunks: list[str]) -> list[str]:
-    """R5: Specification tables are never split."""
-    # Tables should remain as single chunks. This rule ensures that if a
-    # table was somehow split, it gets reassembled. In practice, since we
-    # detect tables and protect them, they should already be intact.
-    # Simply pass through — tables are atomic.
-    return list(chunks)
+    """R5: Specification tables are never split.
+
+    If a prior splitting rule broke a table across two adjacent chunks,
+    this rule detects the split and re-merges them.  The heuristic is
+    conservative -- both signals must agree before merging:
+
+    1. The current chunk must end with table-like content (the last
+       table detected by ``detect_tables`` extends to or near the
+       chunk's last line).
+    2. The next chunk must start with table-like content (``detect_tables``
+       returns at least one table whose first line is near line 0).
+
+    When both conditions hold, the two chunks are concatenated.  The merged
+    result is then re-evaluated on the next iteration so that a table
+    split across three chunks is still reassembled.
+    """
+    if len(chunks) <= 1:
+        return list(chunks)
+
+    result: list[str] = []
+    i = 0
+    while i < len(chunks):
+        current = chunks[i]
+
+        if i + 1 < len(chunks):
+            next_chunk = chunks[i + 1]
+
+            # Signal 1: current chunk ends with table content
+            current_lines = current.split("\n")
+            current_tables = detect_tables(current)
+            current_ends_with_table = False
+            if current_tables:
+                last_table_end = current_tables[-1][1]
+                # The table's last line is at or very near the end of the chunk
+                # (allow up to 2 trailing blank/whitespace lines)
+                non_blank_end = len(current_lines) - 1
+                while non_blank_end > 0 and not current_lines[non_blank_end].strip():
+                    non_blank_end -= 1
+                if last_table_end >= non_blank_end - 1:
+                    current_ends_with_table = True
+
+            # Signal 2: next chunk starts with table content
+            next_tables = detect_tables(next_chunk)
+            next_starts_with_table = False
+            if next_tables:
+                first_table_start = next_tables[0][0]
+                # The first table starts at or very near the beginning
+                # (allow up to 2 leading blank lines)
+                next_lines = next_chunk.split("\n")
+                first_non_blank = 0
+                while first_non_blank < len(next_lines) and not next_lines[first_non_blank].strip():
+                    first_non_blank += 1
+                if first_table_start <= first_non_blank + 1:
+                    next_starts_with_table = True
+
+            # Only merge when BOTH signals agree
+            if current_ends_with_table and next_starts_with_table:
+                merged = current + "\n" + next_chunk
+                # Replace the next chunk with the merged result so we can
+                # re-evaluate (handles 3-way splits)
+                chunks[i + 1] = merged
+                i += 1
+                continue
+
+        result.append(current)
+        i += 1
+
+    return result
 
 
 def apply_rule_r6_merge_small(chunks: list[str], min_tokens: int = 200) -> list[str]:
@@ -508,23 +575,61 @@ def _is_crossref_only(text: str, compiled_patterns: list[re.Pattern]) -> bool:
 def apply_rule_r8_figure_continuity(
     chunks: list[str], figure_pattern: str
 ) -> list[str]:
-    """R8: Figure references stay with the text describing them."""
-    # Ensure figure references remain with their describing text.
-    # If a figure reference appears at the start of a chunk but the describing
-    # text is in the previous chunk, merge them.
+    """R8: Figure references stay with the text describing them.
+
+    If a chunk's first non-blank line is primarily a figure reference or
+    caption (e.g. ``FIG. B-1 -- Engine Lubrication System Diagram``) and
+    the *previous* chunk also mentions the same figure, this rule merges
+    the orphaned figure line back into the previous chunk.
+
+    The heuristic is intentionally conservative:
+    * Only the first non-blank line of a chunk is considered a candidate.
+    * The line must match ``figure_pattern``.
+    * The previous chunk must also contain a match for the same pattern
+      (confirming the figure is discussed there, not somewhere unrelated).
+    """
     pat = re.compile(figure_pattern)
 
-    # In the simple case: chunks already contain figure refs with their text.
-    # Just pass through since figure refs should already be attached.
     result: list[str] = []
     i = 0
     while i < len(chunks):
         chunk = chunks[i]
-        if pat.search(chunk):
-            # Figure reference is in this chunk — it stays with describing text
-            result.append(chunk)
-        else:
-            result.append(chunk)
+
+        if result:
+            # Check if this chunk starts with a figure reference line
+            lines = chunk.split("\n")
+            first_non_blank_idx = 0
+            while first_non_blank_idx < len(lines) and not lines[first_non_blank_idx].strip():
+                first_non_blank_idx += 1
+
+            if first_non_blank_idx < len(lines):
+                first_line = lines[first_non_blank_idx].strip()
+                first_match = pat.search(first_line)
+
+                if first_match:
+                    # Extract the figure identifier from the first line
+                    fig_id = first_match.group(1) if first_match.lastindex else first_match.group(0)
+
+                    # Check if the previous chunk references the same figure
+                    prev_chunk = result[-1]
+                    prev_has_same_fig = False
+                    for prev_match_obj in pat.finditer(prev_chunk):
+                        prev_fig_id = (
+                            prev_match_obj.group(1)
+                            if prev_match_obj.lastindex
+                            else prev_match_obj.group(0)
+                        )
+                        if prev_fig_id == fig_id:
+                            prev_has_same_fig = True
+                            break
+
+                    if prev_has_same_fig:
+                        # Merge this chunk into the previous one
+                        result[-1] = prev_chunk + "\n\n" + chunk
+                        i += 1
+                        continue
+
+        result.append(chunk)
         i += 1
 
     return result
@@ -596,16 +701,17 @@ def assemble_chunks(
     all_text = "\n".join(pages)
     lines = all_text.split("\n")
     total_lines = len(lines)
+    logger.debug("Assembling chunks from %d manifest entries, %d total lines", len(manifest.entries), total_lines)
 
     result_chunks: list[Chunk] = []
 
     for entry_idx, entry in enumerate(manifest.entries):
         # Extract text for this manifest entry based on line range
-        start_line = entry.line_range.get("start", 0)
+        start_line = entry.line_range.start
         # Determine end line: either the entry's end, or the start of the next entry
         if entry_idx + 1 < len(manifest.entries):
             next_entry = manifest.entries[entry_idx + 1]
-            end_line = next_entry.line_range.get("start", total_lines)
+            end_line = next_entry.line_range.start
         else:
             end_line = total_lines
 
@@ -699,7 +805,7 @@ def assemble_chunks(
                 "hierarchical_header": header,
                 "hierarchy_path": entry.hierarchy_path,
                 "content_type": entry.content_type,
-                "page_range": entry.page_range,
+                "page_range": asdict(entry.page_range),
                 "vehicle_models": tags["vehicle_models"],
                 "engine_applicability": tags["engine_applicability"],
                 "drivetrain_applicability": tags["drivetrain_applicability"],
@@ -717,4 +823,45 @@ def assemble_chunks(
                 )
             )
 
+    logger.debug("Assembled %d chunks from %d manifest entries", len(result_chunks), len(manifest.entries))
     return result_chunks
+
+
+def save_chunks(chunks: list[Chunk], output_path: Path) -> None:
+    """Write chunks to a JSONL file (one JSON object per line).
+
+    Each line contains: chunk_id, manual_id, text, metadata.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for chunk in chunks:
+            record = {
+                "chunk_id": chunk.chunk_id,
+                "manual_id": chunk.manual_id,
+                "text": chunk.text,
+                "metadata": chunk.metadata,
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_chunks(input_path: Path) -> list[Chunk]:
+    """Read chunks from a JSONL file back into Chunk objects.
+
+    Each line must be a JSON object with: chunk_id, manual_id, text, metadata.
+    """
+    chunks: list[Chunk] = []
+    with open(input_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            chunks.append(
+                Chunk(
+                    chunk_id=record["chunk_id"],
+                    manual_id=record["manual_id"],
+                    text=record["text"],
+                    metadata=record["metadata"],
+                )
+            )
+    return chunks

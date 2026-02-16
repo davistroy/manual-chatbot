@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .profile import ManualProfile
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,6 +24,20 @@ class Boundary:
 
 
 @dataclass
+class PageRange:
+    """Typed page range for a manifest entry."""
+    start: str
+    end: str
+
+
+@dataclass
+class LineRange:
+    """Typed line range for a manifest entry."""
+    start: int
+    end: int
+
+
+@dataclass
 class ManifestEntry:
     """A single entry in the hierarchical manifest."""
     chunk_id: str
@@ -29,8 +46,8 @@ class ManifestEntry:
     title: str
     hierarchy_path: list[str]
     content_type: str
-    page_range: dict[str, str]
-    line_range: dict[str, int]
+    page_range: PageRange
+    line_range: LineRange
     vehicle_applicability: list[str]
     engine_applicability: list[str]
     drivetrain_applicability: list[str]
@@ -61,6 +78,7 @@ def detect_boundaries(
         Ordered list of detected boundaries, sorted by page_number then line_number.
     """
     boundaries: list[Boundary] = []
+    logger.debug("Scanning %d pages for structural boundaries", len(pages))
 
     # Pre-compile patterns for each hierarchy level
     compiled_levels: list[
@@ -140,6 +158,7 @@ def detect_boundaries(
 
     # Sort by page_number, then line_number
     boundaries.sort(key=lambda b: (b.page_number, b.line_number))
+    logger.debug("Detected %d boundaries across %d pages", len(boundaries), len(pages))
     return boundaries
 
 
@@ -242,8 +261,8 @@ def build_manifest(
             title=boundary_title_str,
             hierarchy_path=hierarchy_path,
             content_type=boundary.level_name,
-            page_range={"start": str(boundary.page_number), "end": str(boundary.page_number)},
-            line_range={"start": boundary.line_number, "end": boundary.line_number},
+            page_range=PageRange(start=str(boundary.page_number), end=str(boundary.page_number)),
+            line_range=LineRange(start=boundary.line_number, end=boundary.line_number),
             vehicle_applicability=vehicle_names,
             engine_applicability=["all"],
             drivetrain_applicability=["all"],

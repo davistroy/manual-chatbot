@@ -56,6 +56,48 @@ class TestBuildParser:
         )
         assert hasattr(args, "manual_id")
 
+    def test_process_accepts_output_dir(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "process", "--profile", "p.yaml", "--pdf", "m.pdf",
+            "--output-dir", "/tmp/output",
+        ])
+        assert args.output_dir == "/tmp/output"
+
+    def test_process_output_dir_defaults_to_none(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "process", "--profile", "p.yaml", "--pdf", "m.pdf",
+        ])
+        assert args.output_dir is None
+
+    def test_verbose_flag_accepted(self):
+        parser = build_parser()
+        args = parser.parse_args(["--verbose", "process", "--profile", "p.yaml", "--pdf", "m.pdf"])
+        assert args.verbose is True
+        assert args.quiet is False
+
+    def test_quiet_flag_accepted(self):
+        parser = build_parser()
+        args = parser.parse_args(["--quiet", "process", "--profile", "p.yaml", "--pdf", "m.pdf"])
+        assert args.quiet is True
+        assert args.verbose is False
+
+    def test_verbose_and_quiet_mutually_exclusive(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--verbose", "--quiet", "process", "--profile", "p.yaml", "--pdf", "m.pdf"])
+
+    def test_short_verbose_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["-v", "process", "--profile", "p.yaml", "--pdf", "m.pdf"])
+        assert args.verbose is True
+
+    def test_short_quiet_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["-q", "process", "--profile", "p.yaml", "--pdf", "m.pdf"])
+        assert args.quiet is True
+
     def test_no_subcommand_shows_help(self):
         parser = build_parser()
         with pytest.raises(SystemExit):
@@ -92,16 +134,18 @@ class TestMain:
         ])
         assert result == 1
 
-    def test_bootstrap_profile_not_implemented_prints_message(self, tmp_path, capsys):
+    def test_bootstrap_profile_not_implemented_prints_message(self, tmp_path, caplog):
+        import logging
+
         pdf = tmp_path / "manual.pdf"
         pdf.write_bytes(b"%PDF-1.4 fake")
-        main([
-            "bootstrap-profile",
-            "--pdf", str(pdf),
-            "--output", str(tmp_path / "out.yaml"),
-        ])
-        captured = capsys.readouterr()
-        assert "not yet implemented" in captured.err
+        with caplog.at_level(logging.ERROR):
+            main([
+                "bootstrap-profile",
+                "--pdf", str(pdf),
+                "--output", str(tmp_path / "out.yaml"),
+            ])
+        assert "not yet implemented" in caplog.text
 
     def test_validate_with_nonexistent_files_returns_error(self, tmp_path):
         result = main([
