@@ -82,6 +82,27 @@ class TestMain:
         ])
         assert result != 0
 
+    def test_bootstrap_profile_not_implemented_returns_error(self, tmp_path):
+        pdf = tmp_path / "manual.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        result = main([
+            "bootstrap-profile",
+            "--pdf", str(pdf),
+            "--output", str(tmp_path / "out.yaml"),
+        ])
+        assert result == 1
+
+    def test_bootstrap_profile_not_implemented_prints_message(self, tmp_path, capsys):
+        pdf = tmp_path / "manual.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        main([
+            "bootstrap-profile",
+            "--pdf", str(pdf),
+            "--output", str(tmp_path / "out.yaml"),
+        ])
+        captured = capsys.readouterr()
+        assert "not yet implemented" in captured.err
+
     def test_validate_with_nonexistent_files_returns_error(self, tmp_path):
         result = main([
             "validate",

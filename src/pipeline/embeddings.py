@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,25 +33,13 @@ def compose_embedding_input(chunk: Chunk) -> EmbeddingInput:
 
     Format: {hierarchical_header}\\n\\n{first_150_words_of_body}
 
-    The chunk text typically starts with a header line followed by body text
-    separated by a double newline. We extract the header portion and truncate
-    the body to 150 words.
+    The hierarchical header is read from chunk.metadata["hierarchical_header"].
+    The body is the full chunk.text, truncated to the first 150 words.
+    If the metadata key is missing, falls back to body text only.
     """
-    text = chunk.text
-    # Split into header and body on the first double-newline
-    parts = text.split("\n\n", 1)
-    if len(parts) == 2:
-        header = parts[0].strip()
-        body = parts[1].strip()
-    else:
-        # No double newline found; treat entire text as body
-        header = ""
-        body = text.strip()
+    header = chunk.metadata.get("hierarchical_header", "").strip()
+    truncated_body = get_first_n_words(chunk.text, 150)
 
-    # Truncate body to first 150 words
-    truncated_body = get_first_n_words(body, 150)
-
-    # Compose the embedding input text
     if header:
         embedding_text = f"{header}\n\n{truncated_body}"
     else:
@@ -73,13 +63,32 @@ def generate_embedding(
 
     Returns:
         Embedding vector as list of floats.
+
+    Raises:
+        RuntimeError: If embedding generation fails after 3 attempts.
     """
     url = f"{base_url}/api/embeddings"
     payload = {"model": model, "prompt": text}
-    response = requests.post(url, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    return data["embedding"]
+    max_attempts = 3
+    last_error: Exception | None = None
+
+    for attempt in range(max_attempts):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code >= 500:
+                last_error = RuntimeError(f"Server error: HTTP {response.status_code}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2 ** attempt)
+                continue
+            response.raise_for_status()
+            data = response.json()
+            return data["embedding"]
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_error = exc
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"Embedding generation failed after {max_attempts} attempts: {last_error}")
 
 
 def create_qdrant_collection(
@@ -128,7 +137,7 @@ def index_chunks(
         payload.update(chunk.metadata)
 
         point = PointStruct(
-            id=i,
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id)),
             vector=vector,
             payload=payload,
         )

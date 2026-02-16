@@ -137,12 +137,17 @@ def detect_safety_callouts(
     lines = text.split("\n")
     callouts: list[dict[str, Any]] = []
 
-    for sc in profile.safety_callouts:
-        pat = re.compile(sc.pattern, re.IGNORECASE if sc.pattern[0] != "^" else 0)
-        # Try case-sensitive first, then case-insensitive
+    # Pre-compile all safety callout patterns once for use in the inner loop
+    compiled_safety = [
+        re.compile(sc2.pattern, re.IGNORECASE if sc2.pattern[0] != "^" else 0)
+        for sc2 in profile.safety_callouts
+    ]
+
+    for sc_idx, sc in enumerate(profile.safety_callouts):
+        pat = compiled_safety[sc_idx]
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if re.search(sc.pattern, stripped):
+            if pat.search(stripped):
                 # Found a callout start. Determine its extent.
                 # The callout continues until the next blank line or
                 # next callout or next structural element.
@@ -153,8 +158,8 @@ def detect_safety_callouts(
                         break
                     # Check if this line starts a new callout
                     is_new_callout = False
-                    for sc2 in profile.safety_callouts:
-                        if re.search(sc2.pattern, next_stripped):
+                    for inner_pat in compiled_safety:
+                        if inner_pat.search(next_stripped):
                             is_new_callout = True
                             break
                     if is_new_callout:
@@ -679,7 +684,18 @@ def assemble_chunks(
             if len(text_chunks) > 1:
                 chunk_id = f"{entry.chunk_id}::part{chunk_idx + 1}"
 
+            # Extract level1_id from hierarchy_path or chunk_id.
+            # hierarchy_path[0] is the level-1 title (e.g. "0 Lubrication and Maintenance").
+            # For the ID we parse the chunk_id: "{manual_id}::{level1_id}::..."
+            level1_id = ""
+            chunk_id_parts = entry.chunk_id.split("::")
+            if len(chunk_id_parts) >= 2:
+                level1_id = chunk_id_parts[1]
+
             metadata = {
+                "manual_id": manifest.manual_id,
+                "level1_id": level1_id,
+                "procedure_name": entry.title,
                 "hierarchical_header": header,
                 "hierarchy_path": entry.hierarchy_path,
                 "content_type": entry.content_type,

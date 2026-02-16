@@ -136,8 +136,8 @@ def cmd_bootstrap_profile(args: argparse.Namespace) -> int:
         print(f"Error: PDF file not found: {pdf_path}", file=sys.stderr)
         return 1
 
-    # TODO: Implement bootstrap profile logic
-    return 0
+    print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)
+    return 1
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

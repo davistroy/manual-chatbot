@@ -23,7 +23,7 @@ from pipeline.chunk_assembly import (
     detect_tables,
     tag_vehicle_applicability,
 )
-from pipeline.profile import load_profile
+from pipeline.profile import SafetyCallout, load_profile
 from pipeline.structural_parser import (
     Manifest,
     ManifestEntry,
@@ -177,6 +177,24 @@ class TestDetectSafetyCallouts:
         callouts = detect_safety_callouts(tm9_sample_page_text, profile)
         levels = [c["level"] for c in callouts]
         assert "note" in levels
+
+    def test_case_insensitive_pattern_matches_uppercase_text(self, xj_profile_path):
+        """A lowercase safety pattern (without ^ anchor) must match uppercase text.
+
+        The IGNORECASE flag is applied to patterns that don't start with '^'.
+        Before the fix, detect_safety_callouts() used the raw pattern string
+        with re.search() instead of the compiled regex, so the flag was lost.
+        """
+        profile = load_profile(xj_profile_path)
+        # Replace safety_callouts with a lowercase, non-anchored pattern
+        profile.safety_callouts = [
+            SafetyCallout(level="warning", pattern="warning:", style="block"),
+        ]
+        text = "WARNING: DO NOT OPERATE WITHOUT SAFETY GEAR."
+        callouts = detect_safety_callouts(text, profile)
+        assert len(callouts) == 1
+        assert callouts[0]["level"] == "warning"
+        assert "WARNING:" in callouts[0]["text"]
 
 
 # ── Table Detection Tests ─────────────────────────────────────────
@@ -524,6 +542,112 @@ class TestRuleOrdering:
                 f"Step ({i}) was split from the sequence — "
                 "R3 (never split steps) must run before R2 (size targets)"
             )
+
+
+# ── Metadata Contract Tests ──────────────────────────────────────
+
+
+class TestMetadataContract:
+    """Verify that assemble_chunks populates manual_id, level1_id, and procedure_name.
+
+    These fields are required by:
+    - qa.check_metadata_completeness (manual_id, level1_id, content_type)
+    - embeddings.build_sqlite_index (procedure_name, level1_id)
+    """
+
+    def _make_manifest(self, manual_id: str, num_lines: int) -> Manifest:
+        """Build a minimal single-entry Manifest spanning all lines."""
+        entry = ManifestEntry(
+            chunk_id=f"{manual_id}::0::SP::JSP",
+            level=3,
+            level_name="procedure",
+            title="Jump Starting Procedure",
+            hierarchy_path=[
+                "0 Lubrication and Maintenance",
+                "SERVICE PROCEDURES",
+                "Jump Starting Procedure",
+            ],
+            content_type="procedure",
+            page_range={"start": "1", "end": "1"},
+            line_range={"start": 0, "end": num_lines},
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id=None,
+            children=[],
+        )
+        return Manifest(manual_id=manual_id, entries=[entry])
+
+    def test_metadata_contains_manual_id(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        page_text = "(1) First step.\n(2) Second step."
+        pages = [page_text]
+        manifest = self._make_manifest("xj-1999", len(page_text.split("\n")))
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+        assert chunks[0].metadata["manual_id"] == "xj-1999"
+
+    def test_metadata_contains_level1_id(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        page_text = "(1) First step.\n(2) Second step."
+        pages = [page_text]
+        manifest = self._make_manifest("xj-1999", len(page_text.split("\n")))
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+        assert chunks[0].metadata["level1_id"] == "0"
+
+    def test_metadata_contains_procedure_name(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        page_text = "(1) First step.\n(2) Second step."
+        pages = [page_text]
+        manifest = self._make_manifest("xj-1999", len(page_text.split("\n")))
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+        assert chunks[0].metadata["procedure_name"] == "Jump Starting Procedure"
+
+    def test_metadata_passes_qa_completeness(self, xj_profile_path):
+        """Chunks from assemble_chunks must pass check_metadata_completeness with zero errors."""
+        from pipeline.qa import check_metadata_completeness
+
+        profile = load_profile(xj_profile_path)
+        page_text = "(1) First step.\n(2) Second step."
+        pages = [page_text]
+        manifest = self._make_manifest("xj-1999", len(page_text.split("\n")))
+        chunks = assemble_chunks(pages, manifest, profile)
+        issues = check_metadata_completeness(chunks)
+        assert issues == [], f"Metadata completeness issues: {issues}"
+
+    def test_metadata_level1_id_extracted_from_chunk_id(self, xj_profile_path):
+        """level1_id is parsed from the chunk_id's second segment."""
+        profile = load_profile(xj_profile_path)
+        page_text = "(1) First step.\n(2) Second step."
+        pages = [page_text]
+
+        entry = ManifestEntry(
+            chunk_id="xj-1999::8A::cooling",
+            level=2,
+            level_name="section",
+            title="Cooling System",
+            hierarchy_path=["8A Cooling System", "Cooling System"],
+            content_type="section",
+            page_range={"start": "1", "end": "1"},
+            line_range={"start": 0, "end": len(page_text.split("\n"))},
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id=None,
+            children=[],
+        )
+        manifest = Manifest(manual_id="xj-1999", entries=[entry])
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1
+        assert chunks[0].metadata["level1_id"] == "8A"
 
 
 # ── Multi-Page Chunk Assembly Tests ─────────────────────────────
