@@ -2,455 +2,348 @@
 
 **Generated:** 2026-02-16
 **Analyzed Project:** manual-chatbot (Smart Chunking Pipeline for Vehicle Service Manual RAG)
-**Input:** REVIEW.md architectural audit + full codebase analysis
+**Input:** End-to-end pipeline run on 1,948-page XJ service manual — output quality analysis
 
 ---
 
 ## Executive Summary
 
-The pipeline's core architecture is sound — TDD foundation, clear module boundaries, well-typed profile system. However, the codebase has three data-integrity defects that will produce incorrect results when processing real multi-page manuals: the cross-page coordinate model conflates per-page line numbers with global offsets, the metadata contract between the assembler and QA/embedding modules is misaligned, and the embedding composition function looks for context in the wrong place. These must be fixed before any real manual processing.
+The pipeline successfully processes the 1,948-page 1999 Jeep Cherokee (XJ) service manual end-to-end, producing 25,130 chunks in 17 MB of JSONL — but output quality has four systemic problems that make the chunks unsuitable for production RAG retrieval.
 
-Beyond correctness, the biggest functional gap is that the pipeline is memory-only — chunks are assembled but never persisted. There's no way to inspect, export, or re-use chunked output without re-running the entire pipeline. Combined with a non-functional `bootstrap-profile` command that silently succeeds and a `qa` command that immediately errors, the CLI gives a false impression of capability.
+**Problem 1 — Boundary over-detection:** The level 2 hierarchy pattern `^([A-Z][A-Z ]{3,})$` matches ANY all-caps line with 4+ characters. In OCR'd wiring diagrams, component labels like "SWITCH" (206 occurrences), "LAMP" (179), "POWER" (175), "RELAY" (159) each trigger a section boundary. Result: 24,473 boundaries from 1,948 pages — roughly 12.5 boundaries per page, when a real service manual has ~2-3 structural transitions per page.
 
-Reliability is the third concern: HTTP calls to Ollama have no timeout, SQLite errors are silently swallowed in retrieval, and Qdrant point IDs are non-deterministic across runs. These will cause silent degradation or hanging in production.
+**Problem 2 — Tiny isolated chunks:** 61.6% of chunks (15,477) contain 5 words or fewer. Median chunk length is 3 words. R6 (merge small) cannot fix this because it operates within a single manifest entry's text, not across entries. A 1-word boundary creates a 1-word entry that R6 can never merge.
+
+**Problem 3 — Wiring diagram noise:** The 8W Wiring Diagrams group accounts for 11,516 chunks (46% of all output), of which 7,478 (65%) contain 3 words or fewer. These are OCR'd component labels and wire color codes, not prose suitable for RAG. The profile already declares `wiring_diagrams.section_id: "8W"` but the pipeline ignores it.
+
+**Problem 4 — Empty metadata enrichment:** Every chunk has `has_safety_callouts: []`, `figure_references: []`, `cross_references: []` despite 997 chunks containing WARNING/CAUTION/NOTE text and 2,287 chunks referencing figures. The detection functions exist (`detect_safety_callouts()`, figure pattern matching) but their results are never stored in chunk metadata. `build_manifest()` hardcodes these fields to `[]` and `assemble_chunks()` copies the empty values through.
+
+All four issues are fixable with targeted changes. The pipeline architecture is sound — no redesign needed.
 
 ---
 
 ## Recommendation Categories
 
-### Category 1: Data Integrity (Critical Correctness)
+### Category 1: Boundary Pattern Precision
 
-#### D1. Fix cross-page chunk slicing coordinate model
+#### Q1. Tighten Level 2 (Section) Pattern to Require Multi-Word Headings
 
 **Priority:** Critical
 **Effort:** M
-**Impact:** Without this fix, chunk text extraction produces wrong content for any manual longer than one page — which is every real manual.
+**Impact:** Eliminates ~12,000 false-positive boundaries, reducing chunk count by ~50%
 
 **Current State:**
-`detect_boundaries()` records `page_number` (0-indexed page) and `line_number` (line offset *within that page*). `build_manifest()` stores `line_range.start = boundary.line_number` directly. Then `assemble_chunks()` joins all pages into one global line list and slices by `line_range.start` as if it's a global offset. For a boundary at page 5, line 12, the assembler slices at global line 12 — which is page 0, line 12.
+Level 2 `id_pattern` and `title_pattern` are both `^([A-Z][A-Z ]{3,})$`. This matches any all-caps line 4+ characters wide. In the XJ manual's OCR output, this fires on:
+- Component labels in wiring diagrams: SWITCH (206x), LAMP (179x), POWER (175x), RELAY (159x), SENSOR (90x), MOTOR (84x)
+- Single-word artifact lines: POSITION, INCORRECT, VEHICLES, EQUIPPED, PASSIVE
+- Shredded WARNING text: "REFER TO" (94x), "WITH AIR- BAGS," (93x), "GROUP 8M -" (93x), "DEPLOYMENT AND" (101x)
+
+These are NOT section headings. Real section headings in the XJ manual are multi-word phrases: "GENERAL INFORMATION", "TORQUE SPECIFICATIONS", "REMOVAL AND INSTALLATION", "COOLING SYSTEM", "DIFFERENTIAL AND DRIVELINE".
 
 **Recommendation:**
-Convert to absolute global line offsets at boundary detection time. Track a running `global_line_offset` as pages are iterated, and store `boundary.line_number = global_line_offset + line_idx`. This makes the manifest's `line_range` values directly usable by `assemble_chunks()` without any coordinate translation.
-
-**Implementation Notes:**
-- Affects `structural_parser.py:79-130` (detect_boundaries loop) and `structural_parser.py:236-237` (build_manifest line_range assignment)
-- Tests in `test_structural_parser.py` that assert per-page line numbers will need updating
-- Must verify with multi-page test fixture (current fixtures are single-page, so the bug is latent)
-- Add a multi-page integration test that catches this regression
-
----
-
-#### D2. Align metadata contract between assembler, QA, and embeddings
-
-**Priority:** Critical
-**Effort:** S
-**Impact:** QA `check_metadata_completeness` always reports false errors for `manual_id` and `level1_id`. SQLite index writes empty strings for `procedure_name` and `level1_id`.
-
-**Current State:**
-QA requires `manual_id`, `level1_id`, `content_type` in `chunk.metadata` (`qa.py:169`). The assembler populates `content_type` but omits `manual_id` and `level1_id` (`chunk_assembly.py:682-693`). Meanwhile `manual_id` is on `chunk.manual_id` (top-level field), not in metadata. `level1_id` is never computed.
-
-The SQLite index in `embeddings.py:193-198` reads `metadata.get("procedure_name", "")` and `metadata.get("level1_id", "")`, getting empty strings for both.
-
-**Recommendation:**
-Add `manual_id` and `level1_id` to the metadata dict in `assemble_chunks()`. Extract `level1_id` from `entry.hierarchy_path[0]` or from `entry.chunk_id` (first segment after manual_id). Add `procedure_name` from `entry.title`. This aligns all three consumers (QA, embeddings/SQLite, retrieval).
-
-**Implementation Notes:**
-- One-line additions to the metadata dict at `chunk_assembly.py:682`
-- Update tests that assert metadata keys
-- Consider whether `manual_id` should remain *only* on `chunk.manual_id` or be duplicated into metadata — consensus from REVIEW.md is to put it in both for payload consistency
-
----
-
-#### D3. Fix embedding composition to use metadata header
-
-**Priority:** Critical
-**Effort:** S
-**Impact:** Embedding quality is degraded because the hierarchical context (manual > group > section > procedure) is missing from the embedding input.
-
-**Current State:**
-`compose_embedding_input()` (`embeddings.py:29-61`) splits `chunk.text` on the first `\n\n` assuming the header is baked into the text. But the assembler stores the hierarchical header in `metadata["hierarchical_header"]` and puts only body text in `chunk.text`.
-
-**Recommendation:**
-Change `compose_embedding_input()` to build embedding text from `chunk.metadata["hierarchical_header"] + "\n\n" + first_150_words(chunk.text)`. This was the agreed approach from the REVIEW.md discussion.
-
-**Implementation Notes:**
-- Straightforward change to `embeddings.py:29-61`
-- Update `test_embeddings.py` tests for `compose_embedding_input`
-- The old `\n\n` split logic becomes dead code — remove it
-
----
-
-### Category 2: Reliability & Error Handling
-
-#### R1. Add timeout and retry for embedding HTTP calls
-
-**Priority:** High
-**Effort:** S
-**Impact:** Without a timeout, `generate_embedding()` will hang indefinitely if Ollama is unresponsive. No retry means transient failures kill the entire indexing run.
-
-**Current State:**
-`requests.post(url, json=payload)` at `embeddings.py:79` has no `timeout` parameter.
-
-**Recommendation:**
-Add `timeout=30` (seconds) to the `requests.post()` call. Add a simple retry with exponential backoff (3 attempts, 1s/2s/4s) for transient errors (connection errors, 5xx responses). Use `requests.adapters.HTTPAdapter` with `urllib3.util.retry.Retry`, or a simple loop — no new dependency needed.
-
-**Implementation Notes:**
-- Keep it simple: a `for attempt in range(3)` loop with `time.sleep(2 ** attempt)` on failure
-- Raise `RuntimeError` with clear message after exhausting retries
-- Add a test that mocks `requests.post` to raise `ConnectionError` and verify retry behavior
-
----
-
-#### R2. Surface retrieval failures instead of silently swallowing
-
-**Priority:** High
-**Effort:** S
-**Impact:** Silent `except sqlite3.Error: pass` at `retrieval.py:354` means database corruption, schema mismatches, or file permission issues go undetected. Users get degraded results with no indication why.
-
-**Current State:**
-`resolve_cross_references()` wraps the entire SQLite interaction in a bare `except sqlite3.Error: pass`.
-
-**Recommendation:**
-Log the error and re-raise as a warning rather than silently swallowing. Use `warnings.warn()` or (after logging is added) `logger.warning()`. Return partial results but surface the failure. Also add the same pattern to `enrich_with_parent()` and `enrich_with_siblings()` which add placeholder results with empty text — document that these are stubs that need production implementation.
-
-**Implementation Notes:**
-- Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
-- Consider a `retrieval_errors: list[str]` field on `RetrievalResponse` to collect non-fatal errors
-- Minimal change, high diagnostic value
-
----
-
-#### R3. Fix safety callout regex handling inconsistency
-
-**Priority:** High
-**Effort:** S
-**Impact:** Pattern matching may behave differently than intended for case-sensitive vs case-insensitive patterns.
-
-**Current State:**
-`detect_safety_callouts()` at `chunk_assembly.py:141` compiles patterns with `re.IGNORECASE` based on a heuristic (`if sc.pattern[0] != "^"`), then at line 145 uses `re.search(sc.pattern, stripped)` — the raw string, not the compiled pattern. The compiled pattern `pat` is created but never used for matching.
-
-**Recommendation:**
-Use the compiled `pat` for matching instead of `re.search(sc.pattern, ...)`. Delete the redundant `re.search` call. This ensures the intended flag behavior is applied.
-
-**Implementation Notes:**
-- One-line fix: change `re.search(sc.pattern, stripped)` to `pat.search(stripped)` at line 145
-- Same fix needed for the inner loop at line 157: `re.search(sc2.pattern, next_stripped)` should use compiled patterns
-- Add a test with a mixed-case safety pattern to verify the fix
-
----
-
-#### R4. Make `bootstrap-profile` fail fast
-
-**Priority:** High
-**Effort:** XS
-**Impact:** Currently returns exit code 0 (success) while doing nothing. Users think bootstrapping worked.
-
-**Current State:**
-`cmd_bootstrap_profile()` at `cli.py:128-140` has a `TODO` comment and `return 0`.
-
-**Recommendation:**
-Print an error message to stderr and return exit code 1. Make it clear this feature is planned but not yet implemented.
-
-**Implementation Notes:**
-- 3-line change: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
-- Update CLI test to expect exit code 1
-
----
-
-#### R5. Use deterministic Qdrant point IDs
-
-**Priority:** Medium
-**Effort:** S
-**Impact:** Non-idempotent indexing — re-running the pipeline creates duplicate points instead of updating them. Point IDs collide across manual runs.
-
-**Current State:**
-`index_chunks()` at `embeddings.py:131` assigns `id=i` (sequential integer from 0). Two different manuals both start at 0.
-
-**Recommendation:**
-Generate deterministic UUIDs from `chunk_id` using `uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id)`. This makes indexing idempotent — re-running with the same chunks overwrites rather than duplicates. Different manuals get different IDs because `chunk_id` includes `manual_id`.
-
-**Implementation Notes:**
-- `import uuid` + `point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
-- Qdrant supports string UUIDs as point IDs
-- Existing tests that mock Qdrant upsert may need updating for the new ID format
-
----
-
-### Category 3: Output Quality & Persistence
-
-#### Q1. Add chunk persistence (JSONL export/import)
-
-**Priority:** High
-**Effort:** M
-**Impact:** Without persistence, every analysis requires re-running the full pipeline. No way to inspect chunks, share results, or feed into external tools.
-
-**Current State:**
-Chunks exist only in memory during a pipeline run. `cmd_process()` assembles chunks and prints a count, then exits. No file output.
-
-**Recommendation:**
-Add `save_chunks(chunks, output_path)` and `load_chunks(input_path)` functions. Use JSONL format (one JSON object per line) for streaming compatibility and easy inspection. Add `--output-dir` flag to `pipeline process` that writes `{manual_id}_chunks.jsonl` and `{manual_id}_manifest.json`.
-
-**Implementation Notes:**
-- New functions in `chunk_assembly.py` or a new `persistence.py` module
-- JSONL is preferable to JSON for large outputs (streamable, appendable)
-- Manifest export is equally important — add `save_manifest(manifest, output_path)`
-- Enable offline QA: `pipeline qa --chunks chunks.jsonl --profile profile.yaml`
-
----
-
-#### Q2. Implement content-type detection
-
-**Priority:** Medium
-**Effort:** M
-**Impact:** `content_type` metadata currently mirrors `level_name` (e.g., "group", "procedure") rather than actual content type (specification_table, wiring_diagram, maintenance_schedule). This limits filtered retrieval.
-
-**Current State:**
-`build_manifest()` sets `content_type=boundary.level_name` at `structural_parser.py:235`. This is structural level, not content type. The profile's `content_types` config (maintenance_schedule, wiring_diagrams, specification_tables) is loaded but never used for classification.
-
-**Recommendation:**
-Add a `classify_content_type(text, entry, profile)` function that examines chunk text for content-type indicators:
-- Specification tables: dot-leaders, columnar data (already detected by `detect_tables()`)
-- Maintenance schedules: interval/mileage keywords
-- Wiring diagrams: wire color codes, connector references
-- Default: "procedure" for step sequences, "general" for everything else
-
-**Implementation Notes:**
-- Add to `chunk_assembly.py` or `structural_parser.py`
-- Use profile's `content_types` config to drive detection heuristics
-- Update metadata dict in `assemble_chunks()` to use classified type
-- This enables retrieval filtering by content type (specs vs procedures vs diagnostics)
-
----
-
-#### Q3. Fix R5 (table integrity) and R8 (figure continuity) no-op implementations
-
-**Priority:** Medium
-**Effort:** S-M
-**Impact:** Two of the eight chunk rules are essentially pass-through functions. Tables can be split and figures can be orphaned.
-
-**Current State:**
-`apply_rule_r5_table_integrity()` at `chunk_assembly.py:411-417` just returns `list(chunks)`. `apply_rule_r8_figure_continuity()` at `chunk_assembly.py:503-525` matches figures but does `result.append(chunk)` in both branches.
-
-**Recommendation:**
-R5: Detect table boundaries within each chunk and prevent splitting across them. If a prior rule split a chunk mid-table, re-merge the table portions. R8: If a chunk starts with a figure reference and the previous chunk contains the describing text (detected by proximity to the reference pattern), merge them.
-
-**Implementation Notes:**
-- `detect_tables()` already exists and works — R5 just needs to use it
-- R8 needs a "figure reference at chunk start" heuristic: if first non-blank line matches figure pattern and previous chunk's last lines reference the same figure, merge
-- Both rules already have the right signatures and position in the pipeline
-- Add targeted tests for each rule showing split-then-reassemble behavior
-
----
-
-### Category 4: Architectural Improvements
-
-#### A1. Type ManifestEntry range fields
-
-**Priority:** Medium
-**Effort:** S
-**Impact:** `page_range: dict[str, str]` and `line_range: dict[str, int]` are accessed via `.get("start", ...)` throughout, which is fragile and untyped.
-
-**Current State:**
-`ManifestEntry` at `structural_parser.py:32-33` uses `dict[str, str]` for page_range and `dict[str, int]` for line_range. These are always `{"start": ..., "end": ...}` but the type system doesn't enforce this.
-
-**Recommendation:**
-Define `Range` dataclasses:
-```python
-@dataclass
-class PageRange:
-    start: str
-    end: str
-
-@dataclass
-class LineRange:
-    start: int
-    end: int
+1. **Require minimum 2 words** in the section pattern. Single uppercase words are component labels, not section titles.
+2. **Increase minimum character count** from 4 to 8+ to avoid matching short fragments.
+3. Consider adding a **negative match list** for known false-positive words common in wiring diagram OCR.
+
+**Proposed pattern:**
+```yaml
+# Level 2 section: at least 2 uppercase words, 8+ total chars
+id_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
+title_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
 ```
-Replace dict access with attribute access throughout.
+
+This matches "GENERAL INFORMATION" and "COOLING SYSTEM" but rejects "SWITCH", "LAMP", "RELAY".
 
 **Implementation Notes:**
-- Affects `structural_parser.py` (ManifestEntry + build_manifest) and `chunk_assembly.py` (assemble_chunks line_range access)
-- Search for `.get("start"` and `.get("end"` to find all access points
-- Tests that construct ManifestEntry dicts will need updating
+- Profile YAML change only — no code change needed in structural_parser.py
+- Must validate against actual section headings from the XJ manual to ensure no false negatives
+- The pattern must still work for single-word group names that ARE valid at level 1 (e.g., "ENGINE", "BRAKES") — these are level 1, not level 2, so this change is safe
 
 ---
 
-#### A2. Add structured logging
-
-**Priority:** Medium
-**Effort:** S-M
-**Impact:** No way to trace pipeline execution, diagnose issues, or measure stage timing. All output is `print()` to stdout.
-
-**Current State:**
-CLI commands use `print()` for progress. No logging framework. No way to control verbosity.
-
-**Recommendation:**
-Add Python `logging` throughout the pipeline. Each module gets its own logger (`logger = logging.getLogger(__name__)`). CLI configures root logger with `--verbose` (DEBUG), default (INFO), `--quiet` (WARNING). Log key metrics at each stage: page count, boundary count, chunk count, timing.
-
-**Implementation Notes:**
-- No new dependency — `logging` is stdlib
-- Replace `print()` calls in CLI with `logger.info()`
-- Add `logger.debug()` for detailed tracing (individual boundary detections, rule applications)
-- Add `--verbose` and `--quiet` flags to CLI
-
----
-
-#### A3. Move `extract_pages` out of `__init__.py`
-
-**Priority:** Low
-**Effort:** XS
-**Impact:** Minor — keeps `__init__.py` clean and makes the extraction stage a proper module.
-
-**Current State:**
-`extract_pages()` lives in `src/pipeline/__init__.py`. It's the only function there. CLI imports it via `from . import extract_pages`.
-
-**Recommendation:**
-Move to `src/pipeline/extraction.py`. Update imports in `cli.py`.
-
-**Implementation Notes:**
-- Trivial refactor, one function
-- Keep a re-export in `__init__.py` for backward compatibility if desired, or just update the two import sites
-
----
-
-### Category 5: Developer Experience
-
-#### X1. Add mypy / pyright type checking
-
-**Priority:** Medium
-**Effort:** S
-**Impact:** Catches type errors at development time rather than runtime. The codebase already has type hints everywhere — just needs a checker.
-
-**Current State:**
-Type hints are present throughout but no type checker is configured. `typing.Any` is used in several places that could be tighter.
-
-**Recommendation:**
-Add `mypy` to dev dependencies. Create a minimal `mypy.ini` or `[tool.mypy]` section in `pyproject.toml`. Start with `--strict` disabled, fix any immediate errors, then tighten incrementally.
-
-**Implementation Notes:**
-- Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
-- Add `[tool.mypy]` section to `pyproject.toml`
-- The `Any` types on Qdrant client parameters should stay as `Any` (external dependency)
-- Run mypy in CI alongside pytest
-
----
-
-#### X2. Add multi-page test fixtures
+#### Q2. Tighten Level 3 (Procedure) Pattern
 
 **Priority:** High
 **Effort:** S
-**Impact:** Current test fixtures are all single-page. The most critical bug (D1, cross-page slicing) is completely untested because no fixture exercises multi-page behavior.
+**Impact:** Reduces false-positive procedure boundaries by ~3,000-5,000
 
 **Current State:**
-`conftest.py` fixtures (`xj_sample_page_text`, `cj_sample_page_text`, `tm9_sample_page_text`) are single-page strings. Tests for `assemble_chunks` construct single-page inputs.
+Level 3 pattern `^([A-Z][A-Z \-\/\(\)]{5,})$` matches any all-caps line 6+ chars including hyphens, slashes, and parens. Too broad — matches component descriptions, table column headers, and OCR noise fragments.
+
+Real procedure headings follow predictable patterns: "REMOVAL AND INSTALLATION", "DISASSEMBLY AND ASSEMBLY", "DIAGNOSIS AND TESTING", "ADJUSTMENT", "INSPECTION".
 
 **Recommendation:**
-Add multi-page fixtures (2-3 pages) for at least one manual profile. Create an end-to-end test that processes multiple pages through `detect_boundaries` → `build_manifest` → `assemble_chunks` and verifies chunk text is extracted from the correct page.
+Require at least 2 words and increase minimum length. Procedure headings in Chrysler manuals are multi-word action phrases.
+
+**Proposed pattern:**
+```yaml
+title_pattern: "^([A-Z][A-Z]+(?:\\s+(?:AND|OR|OF|THE|IN|FOR|TO)\\s+)?[A-Z][A-Z \\-\\/\\(\\)]{3,})$"
+```
 
 **Implementation Notes:**
-- This test would have caught bug D1 immediately
-- Keep fixtures minimal (2-3 pages with 1-2 boundaries each)
-- Can be added to existing test files or as a new `test_multipage.py`
+- Profile YAML change only
+- Test against procedure headings extracted from the pipeline run
+- The conjunction words (AND, OR, OF) are included because "REMOVAL AND INSTALLATION" is a canonical procedure heading format
 
 ---
 
-#### X3. Add CI pipeline (GitHub Actions)
+#### Q3. Add Post-Detection Boundary Filtering in `detect_boundaries()`
 
-**Priority:** Low
+**Priority:** High
+**Effort:** M
+**Impact:** Prevents the structural fragmentation that creates 1-3 word chunks even when patterns are correct
+
+**Current State:**
+`detect_boundaries()` matches patterns line-by-line with zero contextual validation. A line matching a section pattern immediately becomes a boundary, regardless of:
+- Whether the previous boundary was 0 lines ago (back-to-back boundaries = false positives)
+- Whether there's any content between boundaries (empty boundaries = junk chunks)
+- Whether the line is embedded in the middle of a paragraph or stands alone
+
+**Recommendation:**
+Add a **post-detection filter** pass after boundary detection that removes suspect boundaries:
+
+1. **Minimum gap filter**: If two boundaries at the same level are fewer than N lines apart (configurable, default: 3), keep only the first one. Back-to-back boundaries indicate OCR noise matching.
+2. **Minimum content filter**: If a boundary has fewer than N words of content before the next boundary (configurable, default: 5), suppress it as a false positive.
+3. **Standalone line check**: Optionally require section-level boundaries to be preceded by a blank line or page boundary.
+
+Add these as **profile-configurable fields** on the hierarchy level:
+```yaml
+- level: 2
+  name: "section"
+  id_pattern: "..."
+  title_pattern: "..."
+  min_gap_lines: 3        # NEW: minimum lines between same-level boundaries
+  min_content_words: 5     # NEW: minimum words before next boundary
+  require_blank_before: true  # NEW: boundary line must follow blank line
+```
+
+**Implementation Notes:**
+- New optional fields on `HierarchyLevel` dataclass (defaults to disabled for backward compat)
+- Applied as a post-filter after `detect_boundaries()` returns, before `build_manifest()`
+- Alternatively, integrate into `detect_boundaries()` itself by tracking previous boundary position
+- Test: create a fixture with back-to-back uppercase words and verify filtering removes false positives
+
+---
+
+### Category 2: Chunk Assembly Improvements
+
+#### Q4. Add Cross-Entry Merge Pass After Chunk Assembly
+
+**Priority:** Critical
+**Effort:** L
+**Impact:** Merges ~15,000 tiny chunks into meaningful units — transforms the median chunk from 3 words to 50+ words
+
+**Current State:**
+`assemble_chunks()` processes each manifest entry independently. For each entry, it extracts text between `line_range.start` and the next entry's start, applies R1-R8, and produces chunks. R6 (merge small) operates only on the `text_chunks` list within that single entry — it can only merge fragments within one entry's text span.
+
+If a manifest entry has 1 word of text (because the next boundary starts immediately), R6 produces a 1-word chunk and moves on. There is no mechanism to merge across entry boundaries. This is why 15,477 chunks are ≤5 words — they are structurally isolated.
+
+**Recommendation:**
+Add a **post-assembly cross-entry merge pass** that runs after all chunks are built:
+
+```python
+def merge_small_across_entries(chunks: list[Chunk], min_tokens: int = 200) -> list[Chunk]:
+    """Merge undersized chunks into their next sibling within the same level-1 group."""
+    result = []
+    i = 0
+    while i < len(chunks):
+        chunk = chunks[i]
+        tokens = count_tokens(chunk.text)
+        if tokens < min_tokens and i + 1 < len(chunks):
+            next_chunk = chunks[i + 1]
+            # Only merge within the same level-1 group
+            if chunk.metadata["level1_id"] == next_chunk.metadata["level1_id"]:
+                # Absorb into next chunk
+                next_chunk.text = chunk.text + "\n\n" + next_chunk.text
+                i += 1
+                continue
+        result.append(chunk)
+        i += 1
+    return result
+```
+
+Call at the end of `assemble_chunks()` before returning.
+
+**Implementation Notes:**
+- New function in `chunk_assembly.py`
+- Must respect level-1 group boundaries (don't merge across groups)
+- The absorbing chunk keeps its own chunk_id and metadata (the small chunk's identity is lost, which is correct — it was too small to be a standalone retrieval unit)
+- May need multiple passes until no chunk is below threshold
+- Test: create manifest entries that produce tiny chunks, verify post-merge sizes
+
+---
+
+### Category 3: Special Content Handling
+
+#### Q5. Add Section Skip List for Wiring Diagrams and Similar Non-Prose Content
+
+**Priority:** Critical
 **Effort:** S
-**Impact:** Automated test runs on push/PR. Currently tests only run manually.
+**Impact:** Eliminates 11,516 junk chunks (46% of output) instantly
 
 **Current State:**
-No `.github/workflows/` directory. No CI configuration.
+The profile declares `content_types.wiring_diagrams.present: true` and `section_id: "8W"` but the pipeline never reads these fields. Every page in Group 8W is processed identically to prose pages — boundary detection fires on component labels, chunk assembly creates thousands of 1-3 word chunks, and the result is noise.
+
+8W pages are wiring diagrams — the OCR text is wire colors, pin numbers, connector IDs, and component labels. This is not natural language and has zero RAG value as individual chunks.
 
 **Recommendation:**
-Add a GitHub Actions workflow that runs `pytest` on push to main and on PRs. Include Python 3.10, 3.11, 3.12, 3.13 matrix. Add mypy check if X1 is implemented.
+Add a `skip_sections` list to the profile schema and filter in `assemble_chunks()`:
+
+```yaml
+# In profile YAML
+skip_sections:
+  - "8W"  # Wiring diagrams — OCR produces non-prose noise
+```
+
+In `assemble_chunks()`, check `entry.chunk_id` against skip_sections. For entries in skipped sections, either:
+- **Option A (recommended):** Skip entirely — produce no chunks
+- **Option B:** Produce one summary chunk per group with `content_type: "wiring_diagram"` and metadata tag for filtering
 
 **Implementation Notes:**
-- Standard Python CI workflow template
-- Keep it simple: install deps, run tests, report
-- Consider adding coverage reporting via codecov or similar
+- Add `skip_sections: list[str]` field to `ManualProfile` (loaded from YAML)
+- 5-line filter in `assemble_chunks()`: `if any(entry.chunk_id.startswith(f"{manual_id}::{skip}") for skip in profile.skip_sections): continue`
+- Alternative: use existing `content_types.wiring_diagrams.section_id` instead of a new field
+- Test: profile with `skip_sections: ["8W"]` produces zero chunks for 8W entries
 
 ---
 
-### Category 6: New Capabilities
+### Category 4: Metadata Enrichment
 
-#### N1. Offline QA mode
+#### Q6. Populate `has_safety_callouts` from Chunk Text
+
+**Priority:** High
+**Effort:** S
+**Impact:** Enables safety-aware retrieval for 997 chunks containing WARNING/CAUTION/NOTE text
+
+**Current State:**
+Every chunk has `has_safety_callouts: []`. The detection function `detect_safety_callouts()` exists and works — R4 calls it to decide merging. But its results are never stored in metadata. `build_manifest()` hardcodes `has_safety_callouts=[]` and `assemble_chunks()` copies `entry.has_safety_callouts` (always `[]`) into the metadata dict at line 812.
+
+The safety patterns (`^WARNING:`, `^CAUTION:`, `^NOTE:`) would match. The OCR text contains 997 chunks with these patterns. The wiring is just missing.
+
+**Recommendation:**
+In `assemble_chunks()`, after the rule pipeline produces final `text_chunks`, run `detect_safety_callouts()` on each chunk's text and store the detected callout levels in metadata:
+
+```python
+# After rule pipeline, for each final chunk_text:
+callouts = detect_safety_callouts(chunk_text, profile)
+safety_levels = sorted(set(c["level"] for c in callouts))
+# Store in metadata:
+metadata["has_safety_callouts"] = safety_levels
+```
+
+**Implementation Notes:**
+- ~5 lines added to the chunk building loop in `assemble_chunks()`
+- `detect_safety_callouts()` already handles pattern matching and extent finding
+- Should scan the final chunk text (after all rules applied), not the raw manifest entry text
+- Test: chunk containing "WARNING: DO NOT..." should have `["warning"]` in metadata
+
+---
+
+#### Q7. Populate `figure_references` from Chunk Text
+
+**Priority:** High
+**Effort:** S
+**Impact:** Enables figure-aware retrieval for 2,287 chunks referencing figures
+
+**Current State:**
+Same wiring problem as Q6. The profile defines `figure_reference.pattern: "\\(Fig\\.\\s+(\\d+)\\)"`. R8 uses it for merge decisions. But detected figure numbers are never stored in metadata. Every chunk has `figure_references: []`.
+
+**Recommendation:**
+In `assemble_chunks()`, scan each final chunk text with the figure reference pattern and populate `figure_references`:
+
+```python
+if profile.figure_reference_pattern:
+    fig_matches = re.findall(profile.figure_reference_pattern, chunk_text)
+    metadata["figure_references"] = sorted(set(fig_matches))
+```
+
+**Implementation Notes:**
+- 3 lines added to chunk building loop
+- `re.findall` with the profile pattern extracts all figure numbers
+- Deduplicate and sort for consistency
+
+---
+
+#### Q8. Populate `cross_references` from Chunk Text
 
 **Priority:** Medium
-**Effort:** S-M
-**Impact:** The `pipeline qa` command currently requires a running Qdrant instance. Most validation checks (orphaned steps, split safety, size outliers, metadata, duplicates) don't need vectors at all.
+**Effort:** S
+**Impact:** Enables cross-reference navigation in retrieval
 
 **Current State:**
-`cmd_qa()` immediately prints an error and returns 1. The validation suite (`run_validation_suite`) works on in-memory chunks — it doesn't need Qdrant.
+`cross_references: []` for all chunks. Profile defines patterns `"Refer to Group (\\d+[A-Z]?)"` and `"Refer to (Section \\d+)"`. R7 uses these for merge decisions but never stores matches.
 
 **Recommendation:**
-Add `--chunks` flag to `pipeline qa` that loads chunks from JSONL (per Q1). Run `run_validation_suite` against loaded chunks + profile. Only the cross-reference resolution step needs Qdrant.
+In `assemble_chunks()`, scan each final chunk text with all cross-reference patterns:
+
+```python
+xrefs = []
+for pattern in profile.cross_reference_patterns:
+    xrefs.extend(re.findall(pattern, chunk_text))
+metadata["cross_references"] = sorted(set(xrefs))
+```
 
 **Implementation Notes:**
-- Depends on Q1 (chunk persistence) for the input format
-- 6 of 7 QA checks are pure functions on chunks + profile
-- `check_cross_ref_validity` works on chunk IDs, not vector search — also offline-capable
+- 4 lines added to chunk building loop
+- Combine with Q6 and Q7 into a single "metadata enrichment" block after rule application
+- Test: chunk containing "Refer to Group 8A" should have `["8A"]` in metadata
 
 ---
 
-#### N2. Retrieval REPL / chatbot interface
+#### Q9. Combine Q6-Q8 into a Single Metadata Enrichment Pass
 
-**Priority:** Low
-**Effort:** L
-**Impact:** The retrieval module is fully implemented but there's no user-facing interface. The only way to query is via Python API.
-
-**Current State:**
-`analyze_query()` and `retrieve()` exist and work, but no CLI command exposes them interactively.
+**Priority:** High (efficiency)
+**Effort:** S
+**Impact:** Clean code organization — one function handles all metadata population
 
 **Recommendation:**
-Add `pipeline query --profile ... --collection ...` command that starts a REPL loop. Accept natural language queries, run through `analyze_query` → `retrieve`, display results with metadata. Optional: format safety callouts prominently.
+Create a `enrich_chunk_metadata()` function that takes the final chunk text, profile, and existing metadata dict, and populates all three fields:
 
-**Implementation Notes:**
-- Requires running Qdrant and Ollama
-- Could start as a simple `while True: input()` loop
-- Consider later: Streamlit or Gradio UI for non-technical users
-- Lower priority than correctness/reliability fixes
+```python
+def enrich_chunk_metadata(
+    text: str, metadata: dict, profile: ManualProfile
+) -> None:
+    """Populate safety callouts, figure refs, and cross-refs from chunk text."""
+    # Safety callouts
+    callouts = detect_safety_callouts(text, profile)
+    metadata["has_safety_callouts"] = sorted(set(c["level"] for c in callouts))
+
+    # Figure references
+    if profile.figure_reference_pattern:
+        metadata["figure_references"] = sorted(set(
+            re.findall(profile.figure_reference_pattern, text)
+        ))
+
+    # Cross references
+    xrefs = []
+    for pattern in profile.cross_reference_patterns:
+        xrefs.extend(re.findall(pattern, text))
+    metadata["cross_references"] = sorted(set(xrefs))
+```
 
 ---
 
 ## Quick Wins
 
-Items that can be completed in under an hour each, with outsized impact:
-
-1. **R4** — Fix `bootstrap-profile` to return error (XS effort, eliminates user confusion)
-2. **D2** — Add `manual_id`/`level1_id` to metadata dict (S effort, fixes QA false errors)
-3. **D3** — Fix `compose_embedding_input` to use metadata header (S effort, fixes embedding quality)
-4. **R3** — Fix safety callout regex to use compiled pattern (S effort, fixes matching behavior)
-5. **R1** — Add timeout to `requests.post()` (S effort, prevents hanging)
-6. **R2** — Replace bare `except` with `warnings.warn()` (S effort, surfaces failures)
-
----
+1. **Q5: Skip wiring diagrams** — Add `skip_sections` field + 5-line filter. Eliminates 46% of junk chunks.
+2. **Q6+Q7+Q8 (via Q9): Metadata enrichment** — ~15 lines of new code. Wires existing detection logic into output. No new algorithms.
+3. **Q1+Q2: Tighten patterns** — Profile YAML changes only, no code. Requires validation against real headings.
 
 ## Strategic Initiatives
 
-Changes requiring broader planning and multi-module coordination:
-
-1. **D1** — Cross-page coordinate model fix (touches parser, manifest, assembler, tests)
-2. **Q1 + N1** — Chunk persistence + offline QA (new module + CLI changes)
-3. **A2** — Structured logging across all modules
-4. **Q2** — Content-type detection (profile config integration + classification logic)
-
----
+1. **Q4: Cross-entry merge** — New function with hierarchy-aware merge logic. Highest structural impact on chunk quality.
+2. **Q3: Boundary post-filtering** — New schema fields + filter logic. Generalizable to all manual profiles.
 
 ## Not Recommended
 
-Items considered but rejected:
-
 | Item | Rationale |
 |------|-----------|
-| **Add `jsonschema` as runtime dependency** | The JSON Schema file is documentation. Runtime validation is handled by Python `validate_profile()`. Adding a schema validator dependency for what's already covered in code adds complexity without benefit. |
-| **Replace dataclasses with Pydantic** | The project deliberately chose dataclasses to stay dependency-light. The typed dataclass approach works well. Pydantic would be over-engineering for this use case. |
-| **Async pipeline execution** | The pipeline is I/O-bound only at embedding generation (Ollama HTTP). Async adds complexity; the simpler fix is batched embedding requests within the existing sync model. |
-| **LangChain / LlamaIndex integration** | The pipeline's value is its domain-specific chunking rules (R1-R8) that generic frameworks don't support. The retrieval module is already purpose-built. |
-| **Real BPE tokenizer (tiktoken)** | Documented tradeoff in `count_tokens()` is sound. Word count is sufficient for chunking decisions. The ~30% overestimate is safe for RAG. Only revisit if strict context window limits become relevant. |
+| **LLM-based boundary detection** | Overkill. Regex patterns work perfectly for Chrysler manuals' highly regular structure — the problem is pattern specificity, not approach. |
+| **Real tokenizer (tiktoken)** | Word-count approximation is fine for merge/split decisions. Whether a 3-word chunk has 3 or 4 BPE tokens doesn't change that it's too small. |
+| **OCR re-processing of wiring diagrams** | Better OCR won't help — wiring diagram content is inherently non-prose. Skip or tag is the right approach. |
+| **ML section classifier** | The hierarchical structure of Chrysler manuals is deterministic, not probabilistic. Regex is the right tool. |
 
 ---
 
 *Recommendations generated by Claude on 2026-02-16*
-*Source: REVIEW.md architectural audit + full codebase deep analysis*
+*Source: End-to-end pipeline run on 1999 XJ Service Manual (1,948 pages → 25,130 chunks)*
