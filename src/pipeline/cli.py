@@ -85,6 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-set", required=True, help="Path to the test set JSON file"
     )
 
+    # validate-chunks subcommand
+    validate_chunks_parser = subparsers.add_parser(
+        "validate-chunks",
+        help="Run offline QA checks on a saved chunks JSONL file",
+    )
+    validate_chunks_parser.add_argument(
+        "--chunks", required=True, help="Path to a chunks JSONL file (produced by save_chunks)"
+    )
+    validate_chunks_parser.add_argument(
+        "--profile", required=True, help="Path to the YAML profile file"
+    )
+
     return parser
 
 
@@ -240,6 +252,55 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_validate_chunks(args: argparse.Namespace) -> int:
+    """Run offline QA checks on a saved chunks JSONL file.
+
+    Returns exit code (0 = success, 1 = validation errors found or input error).
+    """
+    chunks_path = Path(args.chunks)
+    profile_path = Path(args.profile)
+
+    if not chunks_path.exists():
+        logger.error("Chunks file not found: %s", chunks_path)
+        return 1
+
+    if not profile_path.exists():
+        logger.error("Profile file not found: %s", profile_path)
+        return 1
+
+    # Imports inside function to avoid circular imports
+    from .profile import load_profile, validate_profile
+    from .chunk_assembly import load_chunks
+    from .qa import run_validation_suite
+
+    # 1. Load and validate profile
+    profile = load_profile(profile_path)
+    errors = validate_profile(profile)
+    if errors:
+        for err in errors:
+            logger.error("Profile error: %s", err)
+        return 1
+    logger.info("Profile loaded: %s", profile.manual_id)
+
+    # 2. Load chunks from JSONL
+    chunks = load_chunks(chunks_path)
+    logger.info("Loaded %d chunks from %s", len(chunks), chunks_path)
+
+    # 3. Run QA validation suite
+    report = run_validation_suite(chunks, profile)
+    logger.info("Validation: %d checks run on %d chunks", len(report.checks_run), report.total_chunks)
+    logger.info("  Errors:   %d", report.error_count)
+    logger.info("  Warnings: %d", report.warning_count)
+    logger.info("  Passed:   %s", report.passed)
+
+    if report.issues:
+        logger.info("Issues:")
+        for issue in report.issues:
+            logger.info("  [%s] %s: %s (chunk: %s)", issue.severity, issue.check, issue.message, issue.chunk_id)
+
+    return 0 if report.passed else 1
+
+
 def cmd_qa(args: argparse.Namespace) -> int:
     """Run QA checks on an indexed manual.
 
@@ -277,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         "process": cmd_process,
         "bootstrap-profile": cmd_bootstrap_profile,
         "validate": cmd_validate,
+        "validate-chunks": cmd_validate_chunks,
         "qa": cmd_qa,
     }
 

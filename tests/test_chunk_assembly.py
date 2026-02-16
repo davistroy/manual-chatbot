@@ -868,6 +868,192 @@ class TestMultiPageAssembly:
                 pass  # Verified by the positive assertion above
 
 
+# ── Three-Page Multi-Page Chunk Assembly Tests ───────────────────
+
+
+class TestThreePageChunkAssembly:
+    """Verify chunk assembly from a 3-page manual produces correct content.
+
+    End-to-end: detect_boundaries -> build_manifest -> assemble_chunks
+    using the ``three_page_manual_pages`` fixture (pages with group, section,
+    and two procedures spanning pages 0-2).
+    """
+
+    def test_produces_chunks_from_all_three_pages(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """assemble_chunks should produce chunks covering content from all 3 pages."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        assert len(chunks) >= 1, "Must produce at least one chunk"
+
+        all_text = " ".join(c.text for c in chunks)
+
+        # Content from page 0
+        assert "cooling system" in all_text.lower() or "Cooling System" in all_text, (
+            "Chunks should include content from page 0"
+        )
+        # Content from page 1 (procedure steps)
+        assert "petcock" in all_text.lower(), (
+            "Chunks should include radiator draining procedure from page 1"
+        )
+        # Content from page 2 (thermostat procedure)
+        assert "thermostat" in all_text.lower(), (
+            "Chunks should include thermostat replacement procedure from page 2"
+        )
+
+    def test_radiator_procedure_chunk_has_steps(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """The radiator draining procedure chunk should contain its numbered steps."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        # Find chunk(s) with radiator procedure content
+        radiator_chunks = [
+            c for c in chunks
+            if "petcock" in c.text.lower() or "RADIATOR DRAINING" in c.text
+        ]
+        assert len(radiator_chunks) >= 1, "Must have a chunk with radiator procedure"
+
+        radiator_text = " ".join(c.text for c in radiator_chunks)
+        assert "(1)" in radiator_text, "Radiator procedure should contain step (1)"
+        assert "(6)" in radiator_text, "Radiator procedure should contain step (6)"
+
+    def test_thermostat_procedure_chunk_has_steps(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """The thermostat replacement procedure chunk should contain its numbered steps."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        # Find chunk(s) with thermostat procedure content
+        thermo_chunks = [
+            c for c in chunks
+            if "thermostat" in c.text.lower()
+            and ("(1)" in c.text or "THERMOSTAT" in c.text)
+        ]
+        assert len(thermo_chunks) >= 1, "Must have a chunk with thermostat procedure"
+
+        thermo_text = " ".join(c.text for c in thermo_chunks)
+        assert "gasket" in thermo_text.lower(), (
+            "Thermostat procedure should include gasket-related steps"
+        )
+
+    def test_page2_safety_callout_detected(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """CAUTION callout on page 2 should be properly detected in assembled chunks."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        # Find chunks containing the CAUTION text from page 2
+        caution_chunks = [
+            c for c in chunks if "CAUTION:" in c.text
+        ]
+        assert len(caution_chunks) >= 1, (
+            "Must detect CAUTION safety callout from page 2"
+        )
+
+        # The CAUTION should be in the same chunk as the thermostat steps
+        for cc in caution_chunks:
+            if "CAUTION: Do not pry" in cc.text:
+                assert "(1)" in cc.text or "thermostat" in cc.text.lower(), (
+                    "CAUTION on page 2 should stay attached to its procedure"
+                )
+
+    def test_page1_warning_callout_detected(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """WARNING callout on page 1 should appear in assembled chunks."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        warning_chunks = [c for c in chunks if "WARNING:" in c.text]
+        assert len(warning_chunks) >= 1, (
+            "Must detect WARNING safety callout from page 1"
+        )
+
+        # WARNING should stay with the radiator draining procedure steps
+        for wc in warning_chunks:
+            if "PRESSURIZED" in wc.text:
+                assert "(1)" in wc.text or "petcock" in wc.text.lower(), (
+                    "WARNING on page 1 should stay attached to radiator draining procedure"
+                )
+
+    def test_no_text_corruption_between_pages(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Chunks from page 2 must not contain page 0 content due to wrong offsets."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        for c in chunks:
+            if "THERMOSTAT" in c.text and c.text.startswith("THERMOSTAT"):
+                # This chunk is the thermostat procedure. It should NOT contain
+                # page 0 intro text.
+                assert "The cooling system maintains" not in c.text, (
+                    "Thermostat chunk should not contain page 0 intro text "
+                    "(indicates wrong line offset extraction)"
+                )
+
+    def test_figure_reference_on_page1_preserved(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Figure reference '(Fig. 1)' on page 1 should appear in the output chunks."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        all_text = " ".join(c.text for c in chunks)
+        assert "(Fig. 1)" in all_text, (
+            "Figure reference from page 1 should appear in assembled chunks"
+        )
+
+    def test_spec_table_line_on_page2_preserved(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """Specification table line on page 2 should appear in the output chunks."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        all_text = " ".join(c.text for c in chunks)
+        assert "195 deg F" in all_text, (
+            "Thermostat specification from page 2 should appear in assembled chunks"
+        )
+
+    def test_chunk_metadata_manual_id(
+        self, xj_profile_path, three_page_manual_pages
+    ):
+        """All chunks should have manual_id 'xj-1999' in their metadata."""
+        profile = load_profile(xj_profile_path)
+        boundaries = detect_boundaries(three_page_manual_pages, profile)
+        manifest = build_manifest(boundaries, profile)
+        chunks = assemble_chunks(three_page_manual_pages, manifest, profile)
+
+        for c in chunks:
+            assert c.metadata["manual_id"] == "xj-1999", (
+                f"Chunk '{c.chunk_id}' has manual_id='{c.metadata['manual_id']}' "
+                f"but expected 'xj-1999'"
+            )
+
+
 # ── Chunk Persistence (JSONL) Tests ──────────────────────────────
 
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .profile import ManualProfile
@@ -297,3 +299,43 @@ def generate_chunk_id(manual_id: str, hierarchy_ids: list[str]) -> str:
     if not hierarchy_ids:
         return manual_id
     return "::".join([manual_id] + hierarchy_ids)
+
+
+def save_manifest(manifest: Manifest, path: Path) -> None:
+    """Serialize a Manifest to a JSON file.
+
+    Uses dataclasses.asdict() for full recursive conversion, then writes
+    indented JSON for readability and diffability.
+
+    Args:
+        manifest: The Manifest object to persist.
+        path: Filesystem path for the output JSON file.
+    """
+    data = asdict(manifest)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    logger.debug("Saved manifest with %d entries to %s", len(manifest.entries), path)
+
+
+def load_manifest(path: Path) -> Manifest:
+    """Deserialize a Manifest from a JSON file.
+
+    Reconstructs fully-typed dataclass instances (Manifest, ManifestEntry,
+    PageRange, LineRange) from the plain-dict JSON representation.
+
+    Args:
+        path: Filesystem path to a manifest JSON file.
+
+    Returns:
+        A Manifest with properly typed ManifestEntry objects.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    entries = []
+    for entry_dict in data["entries"]:
+        entry_dict["page_range"] = PageRange(**entry_dict["page_range"])
+        entry_dict["line_range"] = LineRange(**entry_dict["line_range"])
+        entries.append(ManifestEntry(**entry_dict))
+
+    return Manifest(manual_id=data["manual_id"], entries=entries)
