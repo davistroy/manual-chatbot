@@ -164,6 +164,107 @@ def detect_boundaries(
     return boundaries
 
 
+def filter_boundaries(
+    boundaries: list[Boundary], profile: ManualProfile, pages: list[str]
+) -> list[Boundary]:
+    """Post-filter detected boundaries using per-level filter configuration.
+
+    Applies three optional filters (configured per hierarchy level on the profile):
+      - min_gap_lines: Remove a boundary if the gap (in lines) between it and the
+        preceding same-level boundary is less than the threshold.
+      - min_content_words: Remove a boundary if the word count between it and the
+        next boundary (or end of document) is below the threshold.
+      - require_blank_before: Remove a boundary whose line is not preceded by a
+        blank line in the page text.
+
+    Args:
+        boundaries: Ordered list of detected boundaries (sorted by page/line).
+        profile: The manual profile with hierarchy-level filter settings.
+        pages: List of cleaned text strings, one per page.
+
+    Returns:
+        Filtered list of boundaries (may be smaller than input).
+    """
+    before = len(boundaries)
+    if before == 0:
+        return []
+
+    # Build filter config lookup: level number -> HierarchyLevel
+    level_config: dict[int, Any] = {}
+    for h in profile.hierarchy:
+        level_config[h.level] = h
+
+    # Concatenate all pages into a single line list for word counting
+    # and blank-line checking (mirrors how detect_boundaries computes
+    # global line_number offsets).
+    all_lines = "\n".join(pages).split("\n")
+    total_lines = len(all_lines)
+
+    # --- Pass 1: require_blank_before ---
+    # Remove boundaries whose line is not preceded by a blank line.
+    filtered = []
+    for b in boundaries:
+        cfg = level_config.get(b.level)
+        if cfg and cfg.require_blank_before:
+            if b.line_number <= 0:
+                # First line of document — no preceding line possible; remove.
+                continue
+            preceding_line = all_lines[b.line_number - 1] if b.line_number < total_lines else ""
+            if preceding_line.strip() != "":
+                continue
+        filtered.append(b)
+    boundaries = filtered
+
+    # --- Pass 2: min_gap_lines ---
+    # For each hierarchy level with min_gap_lines > 0, iterate same-level
+    # boundaries in order. If the gap to the preceding same-level boundary
+    # is less than the threshold, drop the second boundary.
+    levels_with_gap = {
+        h.level for h in profile.hierarchy if h.min_gap_lines > 0
+    }
+    if levels_with_gap:
+        # Track last-seen line_number per level
+        last_line: dict[int, int] = {}
+        filtered = []
+        for b in boundaries:
+            if b.level in levels_with_gap:
+                cfg = level_config[b.level]
+                if b.level in last_line:
+                    gap = b.line_number - last_line[b.level]
+                    if gap < cfg.min_gap_lines:
+                        continue  # too close to previous same-level boundary
+                last_line[b.level] = b.line_number
+            filtered.append(b)
+        boundaries = filtered
+
+    # --- Pass 3: min_content_words ---
+    # For each boundary, count words between it and the next boundary
+    # (or end of document). If below the level's min_content_words, remove it.
+    levels_with_min_words = {
+        h.level for h in profile.hierarchy if h.min_content_words > 0
+    }
+    if levels_with_min_words:
+        filtered = []
+        for i, b in enumerate(boundaries):
+            if b.level in levels_with_min_words:
+                cfg = level_config[b.level]
+                start_line = b.line_number
+                if i + 1 < len(boundaries):
+                    end_line = boundaries[i + 1].line_number
+                else:
+                    end_line = total_lines
+                span = all_lines[start_line:end_line]
+                word_count = sum(len(line.split()) for line in span)
+                if word_count < cfg.min_content_words:
+                    continue
+            filtered.append(b)
+        boundaries = filtered
+
+    after = len(boundaries)
+    logger.info("Boundary filter: %d → %d boundaries", before, after)
+    return boundaries
+
+
 def validate_boundaries(
     boundaries: list[Boundary], profile: ManualProfile
 ) -> list[str]:

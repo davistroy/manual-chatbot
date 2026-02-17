@@ -125,7 +125,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     from .profile import load_profile, validate_profile
     from . import extract_pages
     from .ocr_cleanup import clean_page
-    from .structural_parser import detect_boundaries, build_manifest
+    from .structural_parser import detect_boundaries, filter_boundaries, build_manifest
     from .chunk_assembly import assemble_chunks, save_chunks
 
     # 1. Load and validate profile
@@ -146,8 +146,9 @@ def cmd_process(args: argparse.Namespace) -> int:
     cleaned_texts = [c.cleaned_text for c in cleaned]
     logger.info("Cleaned %d pages", len(cleaned))
 
-    # 4. Detect boundaries and build manifest
+    # 4. Detect boundaries, filter, and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
+    boundaries = filter_boundaries(boundaries, profile, cleaned_texts)
     manifest = build_manifest(boundaries, profile)
     logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
@@ -288,7 +289,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from .profile import load_profile, validate_profile
     from . import extract_pages
     from .ocr_cleanup import clean_page
-    from .structural_parser import detect_boundaries, build_manifest, validate_boundaries
+    from .structural_parser import detect_boundaries, filter_boundaries, build_manifest, validate_boundaries
     from .chunk_assembly import assemble_chunks
     from .qa import run_validation_suite
 
@@ -310,8 +311,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     cleaned_texts = [c.cleaned_text for c in cleaned]
     logger.info("Cleaned %d pages", len(cleaned))
 
-    # 4. Detect boundaries and build manifest
+    # 4. Detect boundaries, filter, and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
+    boundaries = filter_boundaries(boundaries, profile, cleaned_texts)
     manifest = build_manifest(boundaries, profile)
     logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
