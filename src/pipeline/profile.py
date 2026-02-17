@@ -23,6 +23,7 @@ class HierarchyLevel:
     min_gap_lines: int = 0          # 0 = disabled
     min_content_words: int = 0      # 0 = disabled
     require_blank_before: bool = False
+    require_known_id: bool = False
 
 
 @dataclass
@@ -207,6 +208,7 @@ def load_profile(path: str | Path) -> ManualProfile:
                 min_gap_lines=h.get("min_gap_lines", 0),
                 min_content_words=h.get("min_content_words", 0),
                 require_blank_before=h.get("require_blank_before", False),
+                require_known_id=h.get("require_known_id", False),
             )
         )
 

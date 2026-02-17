@@ -200,6 +200,21 @@ def filter_boundaries(
     all_lines = "\n".join(pages).split("\n")
     total_lines = len(all_lines)
 
+    # --- Pass 0: require_known_id ---
+    known_id_sets: dict[int, set[str]] = {}
+    for h in profile.hierarchy:
+        if h.require_known_id and h.known_ids:
+            known_id_sets[h.level] = {entry["id"] for entry in h.known_ids}
+
+    if known_id_sets:
+        filtered = []
+        for b in boundaries:
+            if b.level in known_id_sets:
+                if b.id is None or b.id not in known_id_sets[b.level]:
+                    continue  # rejected
+            filtered.append(b)
+        boundaries = filtered
+
     # --- Pass 1: require_blank_before ---
     # Remove boundaries whose line is not preceded by a blank line.
     filtered = []

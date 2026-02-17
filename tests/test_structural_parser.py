@@ -562,6 +562,125 @@ class TestFilterBoundaries:
         assert len(filtered) == 2
 
 
+# ── Require Known ID Filter Tests ─────────────────────────────────
+
+
+class TestRequireKnownId:
+    """Test Pass 0 require_known_id filtering in filter_boundaries()."""
+
+    @pytest.fixture
+    def _make_profile_with_require(self, xj_profile_path):
+        """Return a helper that loads the XJ profile and configures require_known_id."""
+        from pipeline.profile import load_profile as _load
+
+        def _inner(
+            require_known_id: bool = False,
+            known_ids: list[dict[str, str]] | None = None,
+            target_level: int = 1,
+        ):
+            profile = _load(xj_profile_path)
+            for h in profile.hierarchy:
+                if h.level == target_level:
+                    h.require_known_id = require_known_id
+                    if known_ids is not None:
+                        h.known_ids = known_ids
+            return profile
+
+        return _inner
+
+    def test_require_known_id_rejects_unknown(self, _make_profile_with_require):
+        """Boundaries with IDs not in known_ids are rejected when require_known_id is True."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}, {"id": "9", "title": "Engine"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="9", title="Engine", page_number=0, line_number=5),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+            Boundary(level=1, level_name="group", id="1999", title="Also Unknown", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        surviving_ids = [b.id for b in filtered]
+        assert "7" in surviving_ids
+        assert "9" in surviving_ids
+        assert "42" not in surviving_ids
+        assert "1999" not in surviving_ids
+        assert len(filtered) == 2
+
+    def test_require_known_id_false_passes_all(self, _make_profile_with_require):
+        """When require_known_id is False, all boundaries pass regardless of known_ids."""
+        profile = _make_profile_with_require(
+            require_known_id=False,
+            known_ids=[{"id": "7", "title": "Cooling"}, {"id": "9", "title": "Engine"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="9", title="Engine", page_number=0, line_number=5),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+            Boundary(level=1, level_name="group", id="1999", title="Also Unknown", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 4
+
+    def test_require_known_id_empty_known_ids_passes_all(self, _make_profile_with_require):
+        """When require_known_id is True but known_ids is empty, all boundaries pass (guard clause)."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 2
+
+    def test_require_known_id_none_id_rejected(self, _make_profile_with_require):
+        """Boundary with id=None is rejected when require_known_id is True."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id=None, title="No ID", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=5),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 1
+        assert filtered[0].id == "7"
+
+    def test_require_known_id_only_affects_configured_level(self, _make_profile_with_require):
+        """require_known_id on L1 does not filter L2 boundaries."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="42", title="Unknown Group", page_number=0, line_number=5),
+            Boundary(level=2, level_name="section", id="UNKNOWN_SECTION", title="UNKNOWN SECTION", page_number=0, line_number=10),
+            Boundary(level=2, level_name="section", id="ANOTHER", title="ANOTHER SECTION", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        # L1: only "7" survives (42 rejected). L2: both pass (not configured).
+        level1 = [b for b in filtered if b.level == 1]
+        level2 = [b for b in filtered if b.level == 2]
+        assert len(level1) == 1
+        assert level1[0].id == "7"
+        assert len(level2) == 2
+
+
 # ── Manifest Building Tests ───────────────────────────────────────
 
 

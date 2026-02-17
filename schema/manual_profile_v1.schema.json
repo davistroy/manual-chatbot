@@ -164,6 +164,11 @@
                 "type": "boolean",
                 "default": false,
                 "description": "Whether a blank line must precede this boundary for it to be accepted."
+              },
+              "require_known_id": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true and known_ids is non-empty, boundaries with IDs not in the known set are filtered out. Boundaries with no extracted ID are also rejected."
               }
             }
           }
