@@ -349,6 +349,27 @@ class TestExpandedValidation:
         assert not any("callout style" in e for e in errors)
 
 
+# ── Skip Sections Tests ───────────────────────────────────────────
+
+
+class TestLoadProfileSkipSections:
+    """Test skip_sections loading from YAML profiles."""
+
+    def test_xj_skip_sections_loaded(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert profile.skip_sections == ["8W"]
+
+    def test_skip_sections_defaults_to_empty_list(self, cj_profile_path: Path):
+        profile = load_profile(cj_profile_path)
+        assert profile.skip_sections == []
+
+    def test_skip_sections_is_list_of_strings(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert isinstance(profile.skip_sections, list)
+        for item in profile.skip_sections:
+            assert isinstance(item, str)
+
+
 # ── Pattern Compilation Tests ─────────────────────────────────────
 
 

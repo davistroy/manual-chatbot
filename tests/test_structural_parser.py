@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -187,6 +188,74 @@ class TestDetectBoundaries:
         pages = ["Just some regular text with no structural markers."]
         boundaries = detect_boundaries(pages, profile)
         assert boundaries == []
+
+
+# ── XJ Hierarchy Pattern Tightening Tests ────────────────────────
+
+
+class TestXjLevel2PatternSelectivity:
+    """Level 2 (section) pattern must require 2+ uppercase words, rejecting single-word OCR artifacts."""
+
+    @pytest.fixture
+    def level2_pattern(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        level2 = [h for h in profile.hierarchy if h.level == 2][0]
+        return re.compile(level2.title_pattern)
+
+    @pytest.mark.parametrize("heading", [
+        "GENERAL INFORMATION",
+        "COOLING SYSTEM",
+        "FUEL INJECTION",
+        "SERVICE PROCEDURES",
+    ])
+    def test_matches_multi_word_section_headings(self, level2_pattern, heading):
+        assert level2_pattern.match(heading), (
+            f"Level 2 pattern should match multi-word heading '{heading}'"
+        )
+
+    @pytest.mark.parametrize("artifact", [
+        "SWITCH",
+        "RELAY",
+        "LAMP",
+        "A",
+    ])
+    def test_rejects_single_word_ocr_artifacts(self, level2_pattern, artifact):
+        assert level2_pattern.match(artifact) is None, (
+            f"Level 2 pattern must reject single-word artifact '{artifact}'"
+        )
+
+
+class TestXjLevel3PatternSelectivity:
+    """Level 3 (procedure) pattern must require 2+ words, rejecting single-word OCR artifacts."""
+
+    @pytest.fixture
+    def level3_pattern(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        level3 = [h for h in profile.hierarchy if h.level == 3][0]
+        return re.compile(level3.title_pattern)
+
+    @pytest.mark.parametrize("heading", [
+        "REMOVAL AND INSTALLATION",
+        "DIAGNOSIS AND TESTING",
+        "JUMP STARTING PROCEDURE",
+        "THERMOSTAT - REMOVAL AND INSTALLATION",
+        "RADIATOR DRAINING AND REFILLING",
+    ])
+    def test_matches_multi_word_procedure_headings(self, level3_pattern, heading):
+        assert level3_pattern.match(heading), (
+            f"Level 3 pattern should match multi-word heading '{heading}'"
+        )
+
+    @pytest.mark.parametrize("artifact", [
+        "SWITCH",
+        "CHECK",
+        "LAMP",
+        "RELAY",
+    ])
+    def test_rejects_single_word_ocr_artifacts(self, level3_pattern, artifact):
+        assert level3_pattern.match(artifact) is None, (
+            f"Level 3 pattern must reject single-word artifact '{artifact}'"
+        )
 
 
 # ── Boundary Validation Tests ─────────────────────────────────────

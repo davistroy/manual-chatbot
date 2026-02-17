@@ -109,6 +109,7 @@ class ManualProfile:
     content_types: ContentTypeConfig
     ocr_cleanup: OcrCleanupConfig
     variants: VariantConfig
+    skip_sections: list[str] = field(default_factory=list)
 
 
 def _parse_content_types(data: dict[str, Any]) -> ContentTypeConfig:
@@ -245,6 +246,7 @@ def load_profile(path: str | Path) -> ManualProfile:
         content_types=_parse_content_types(data.get("content_types", {})),
         ocr_cleanup=_parse_ocr_cleanup(data.get("ocr_cleanup", {})),
         variants=_parse_variants(data.get("variants", {})),
+        skip_sections=data.get("skip_sections", []),
     )
 
 

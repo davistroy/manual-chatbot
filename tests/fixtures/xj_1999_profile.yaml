@@ -41,12 +41,12 @@ structure:
         - { id: "14", title: "Fuel System" }
     - level: 2
       name: "section"
-      id_pattern: "^([A-Z][A-Z ]{3,})$"
-      title_pattern: "^([A-Z][A-Z ]{3,})$"
+      id_pattern: "^([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
+      title_pattern: "^([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
     - level: 3
       name: "procedure"
       id_pattern: null
-      title_pattern: "^([A-Z][A-Z \\-\\/\\(\\)]{5,})$"
+      title_pattern: "^([A-Z]{2,}(?:\\s+[A-Z/\\-\\(\\) ]{2,})+)$"
     - level: 4
       name: "sub-procedure"
       id_pattern: null
@@ -103,3 +103,5 @@ variants:
   has_market_variants: true
   variant_indicator: "suffix_a"
   markets: ["domestic", "international"]
+
+skip_sections: ["8W"]

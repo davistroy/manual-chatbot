@@ -303,6 +303,12 @@
           "description": "Markets covered by this manual."
         }
       }
+    },
+    "skip_sections": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Level-1 section IDs to exclude from chunk assembly (e.g., ['8W'] to skip wiring diagrams)."
     }
   }
 }

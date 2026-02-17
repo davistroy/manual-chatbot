@@ -635,6 +635,44 @@ def apply_rule_r8_figure_continuity(
     return result
 
 
+def enrich_chunk_metadata(
+    text: str, metadata: dict[str, Any], profile: ManualProfile
+) -> None:
+    """Scan chunk text for safety callouts, figure references, and cross-references.
+
+    Updates *metadata* in place with three keys:
+
+    - ``has_safety_callouts``  -- sorted, deduplicated list of callout levels
+      found in *text* (e.g. ``["caution", "warning"]``).
+    - ``figure_references``    -- sorted, deduplicated list of figure reference
+      strings found via ``profile.figure_reference_pattern``.
+    - ``cross_references``     -- sorted, deduplicated list of cross-reference
+      strings found via ``profile.cross_reference_patterns``.
+
+    All three keys are always present after this call (empty lists if nothing
+    matched).  The function is designed to run *after* chunk rules R1-R8 so
+    the metadata reflects the actual chunk content rather than the original
+    manifest entry boundaries.
+    """
+    # -- Safety callouts ------------------------------------------------
+    callouts = detect_safety_callouts(text, profile)
+    levels = sorted({c["level"] for c in callouts})
+    metadata["has_safety_callouts"] = levels
+
+    # -- Figure references ----------------------------------------------
+    if profile.figure_reference_pattern:
+        fig_matches = re.findall(profile.figure_reference_pattern, text)
+        metadata["figure_references"] = sorted(set(fig_matches))
+    else:
+        metadata["figure_references"] = []
+
+    # -- Cross-references -----------------------------------------------
+    xref_matches: list[str] = []
+    for pat in profile.cross_reference_patterns:
+        xref_matches.extend(re.findall(pat, text))
+    metadata["cross_references"] = sorted(set(xref_matches))
+
+
 def tag_vehicle_applicability(
     text: str, profile: ManualProfile
 ) -> dict[str, list[str]]:
@@ -705,7 +743,15 @@ def assemble_chunks(
 
     result_chunks: list[Chunk] = []
 
+    # Build skip prefixes from profile.skip_sections
+    manual_id = manifest.manual_id
+    skip_prefixes = [f"{manual_id}::{s}" for s in profile.skip_sections]
+
     for entry_idx, entry in enumerate(manifest.entries):
+        # Skip entries whose chunk_id matches a skipped section prefix
+        if skip_prefixes and any(entry.chunk_id.startswith(p) for p in skip_prefixes):
+            logger.debug("Skipping entry %s (matches skip_sections)", entry.chunk_id)
+            continue
         # Extract text for this manifest entry based on line range
         start_line = entry.line_range.start
         # Determine end line: either the entry's end, or the start of the next entry
@@ -813,6 +859,12 @@ def assemble_chunks(
                 "figure_references": entry.figure_references,
                 "cross_references": entry.cross_references,
             }
+
+            # Enrich metadata by scanning the actual chunk text for
+            # safety callouts, figure refs, and cross-refs.  This
+            # overwrites the manifest-entry-level values with per-chunk
+            # values that reflect what is really in this text fragment.
+            enrich_chunk_metadata(chunk_text, metadata, profile)
 
             result_chunks.append(
                 Chunk(
