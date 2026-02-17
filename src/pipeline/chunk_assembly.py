@@ -745,6 +745,11 @@ def enrich_chunk_metadata(
     xref_matches: list[str] = []
     for pat in profile.cross_reference_patterns:
         xref_matches.extend(re.findall(pat, text))
+    # Qualify cross-references with manual_id namespace prefix so they
+    # resolve against chunk IDs (which are "{manual_id}::{group}::...").
+    manual_id = metadata.get("manual_id", "")
+    if manual_id:
+        xref_matches = [f"{manual_id}::{ref}" for ref in xref_matches]
     metadata["cross_references"] = sorted(set(xref_matches))
 
 

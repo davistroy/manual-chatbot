@@ -402,3 +402,77 @@ class TestRunValidationSuite:
         chunks = [_make_chunk(metadata={})]
         report = run_validation_suite(chunks, profile)
         assert report.passed is False
+
+
+# ── Qualified Cross-Reference Tests ──────────────────────────────
+
+
+class TestQualifiedCrossRefs:
+    """Test namespace-qualified cross-reference validation."""
+
+    def test_cross_ref_qualified_resolves(self):
+        """A qualified cross-reference that matches a chunk ID prefix produces no error."""
+        chunks = [
+            _make_chunk(
+                chunk_id="xj-1999::0::SP",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["xj-1999::7"],
+                },
+            ),
+            _make_chunk(
+                chunk_id="xj-1999::7::cooling",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "7",
+                    "content_type": "section",
+                    "cross_references": [],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors == [], f"Qualified ref 'xj-1999::7' should resolve via prefix: {errors}"
+
+    def test_cross_ref_bare_id_fails(self):
+        """A bare (unqualified) cross-reference that doesn't match any chunk ID produces an error."""
+        chunks = [
+            _make_chunk(
+                chunk_id="xj-1999::0::SP",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["7"],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert len(errors) >= 1, "Bare ref '7' should NOT resolve and should produce an error"
+
+    def test_cross_ref_skipped_section_is_warning(self, xj_profile_path):
+        """A cross-reference to a skipped section produces a warning, not an error."""
+        profile = load_profile(xj_profile_path)
+        # xj profile has skip_sections: ["8W"]
+        chunks = [
+            _make_chunk(
+                chunk_id="xj-1999::0::SP",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["xj-1999::8W"],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks, profile)
+        assert len(issues) >= 1, "Should produce at least one issue for unresolved ref"
+        for issue in issues:
+            assert issue.severity == "warning", (
+                f"Skipped-section ref should be warning, not {issue.severity}"
+            )
+            assert "skipped section" in issue.message
+            assert issue.details["skipped"] is True

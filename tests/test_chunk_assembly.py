@@ -1738,7 +1738,26 @@ class TestEnrichChunkMetadata:
         assert len(fig_chunks) >= 1
         assert "1" in fig_chunks[0].metadata["figure_references"]
 
-        # Find the chunk with the cross-reference
+        # Find the chunk with the cross-reference (qualified with manual_id prefix)
         xref_chunks = [c for c in chunks if "Refer to Group 8A" in c.text]
         assert len(xref_chunks) >= 1
-        assert "8A" in xref_chunks[0].metadata["cross_references"]
+        assert "xj-1999::8A" in xref_chunks[0].metadata["cross_references"]
+
+    def test_enrich_cross_refs_qualified(self, xj_profile_path):
+        """Cross-references are qualified with manual_id:: prefix when manual_id is in metadata."""
+        profile = load_profile(xj_profile_path)
+        text = "Refer to Group 7 for cooling procedures."
+        metadata: dict = {"manual_id": "xj-1999"}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["cross_references"] == ["xj-1999::7"]
+
+    def test_enrich_cross_refs_deduped(self, xj_profile_path):
+        """Duplicate cross-references are deduplicated after qualification."""
+        profile = load_profile(xj_profile_path)
+        text = (
+            "Refer to Group 7 for cooling procedures.\n"
+            "Refer to Group 7 for additional details."
+        )
+        metadata: dict = {"manual_id": "xj-1999"}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["cross_references"] == ["xj-1999::7"]
