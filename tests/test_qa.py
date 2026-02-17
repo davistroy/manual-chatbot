@@ -453,6 +453,144 @@ class TestQualifiedCrossRefs:
         errors = [i for i in issues if i.severity == "error"]
         assert len(errors) >= 1, "Bare ref '7' should NOT resolve and should produce an error"
 
+    def test_cross_ref_suffix_segment_resolves(self):
+        """A partial-path ref resolves via suffix-segment when the suffix
+        appears as a complete segment in a hierarchical chunk ID."""
+        chunks = [
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::0::SP",
+                text="See paragraph 69.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["tm9-8014-m38a1::69"],
+                },
+            ),
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::1::IV::69",
+                text="Paragraph 69 content here.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "1",
+                    "content_type": "procedure",
+                    "cross_references": [],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors == [], (
+            f"Ref 'tm9-8014-m38a1::69' should resolve via suffix-segment to "
+            f"'tm9-8014-m38a1::1::IV::69': {errors}"
+        )
+
+    def test_cross_ref_suffix_segment_no_partial_digit_match(self):
+        """Suffix-segment matching must not match partial digits —
+        '::69' must NOT match '::169' (only full segment boundaries)."""
+        chunks = [
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::0::SP",
+                text="See paragraph 69.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["tm9-8014-m38a1::69"],
+                },
+            ),
+            # Chunk ID ends with ::169, NOT ::69 — should NOT match
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::1::IV::169",
+                text="Paragraph 169 content here.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "1",
+                    "content_type": "procedure",
+                    "cross_references": [],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert len(errors) >= 1, (
+            "Ref 'tm9-8014-m38a1::69' must NOT match chunk '::169' (partial digit)"
+        )
+
+    def test_cross_ref_suffix_segment_no_prefix_digit_match(self):
+        """Suffix-segment matching must not match when the suffix is a prefix
+        of another segment — '::69' must NOT match '::690'."""
+        chunks = [
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::0::SP",
+                text="See paragraph 69.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": ["tm9-8014-m38a1::69"],
+                },
+            ),
+            # Chunk ID ends with ::690, NOT ::69 — should NOT match
+            _make_chunk(
+                chunk_id="tm9-8014-m38a1::1::IV::690",
+                text="Paragraph 690 content here.",
+                metadata={
+                    "manual_id": "tm9-8014-m38a1",
+                    "level1_id": "1",
+                    "content_type": "procedure",
+                    "cross_references": [],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert len(errors) >= 1, (
+            "Ref 'tm9-8014-m38a1::69' must NOT match chunk '::690' (prefix digit)"
+        )
+
+    def test_cross_ref_existing_strategies_no_regression(self):
+        """XJ cross-refs that resolve via existing strategies (exact, prefix,
+        string-prefix) must still work after adding suffix-segment matching."""
+        chunks = [
+            # Chunk with refs that resolve via strategies 1-3
+            _make_chunk(
+                chunk_id="xj-1999::0::SP",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "0",
+                    "content_type": "procedure",
+                    "cross_references": [
+                        "xj-1999::8A",         # strategy 1: exact chunk ID
+                        "xj-1999::8",           # strategy 2/3: prefix match
+                    ],
+                },
+            ),
+            _make_chunk(
+                chunk_id="xj-1999::8A",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "8A",
+                    "content_type": "procedure",
+                    "cross_references": [],
+                },
+            ),
+            _make_chunk(
+                chunk_id="xj-1999::8A::cooling",
+                metadata={
+                    "manual_id": "xj-1999",
+                    "level1_id": "8A",
+                    "content_type": "section",
+                    "cross_references": [],
+                },
+            ),
+        ]
+        issues = check_cross_ref_validity(chunks)
+        errors = [i for i in issues if i.severity == "error"]
+        assert errors == [], (
+            f"Existing XJ cross-ref resolution strategies must not regress: {errors}"
+        )
+
     def test_cross_ref_skipped_section_is_warning(self, xj_profile_path):
         """A cross-reference to a skipped section produces a warning, not an error."""
         profile = load_profile(xj_profile_path)

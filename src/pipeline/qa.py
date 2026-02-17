@@ -274,23 +274,70 @@ def check_cross_ref_validity(
             continue
 
         for ref in cross_refs:
-            # Check if the reference resolves to any known chunk ID or prefix.
-            # Also check string-prefix matching for group families (e.g.,
-            # "xj-1999::8" should match "xj-1999::8A", "xj-1999::8B", etc.)
-            if ref not in all_chunk_ids and ref not in all_prefixes and not any(
+            # Strategy 1-3: exact chunk ID, exact prefix, or string-prefix match
+            # (e.g., "xj-1999::8" matches "xj-1999::8A", "xj-1999::8B", etc.)
+            if ref in all_chunk_ids or ref in all_prefixes or any(
                 p.startswith(ref) for p in all_prefixes
             ):
-                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
-                issues.append(
-                    ValidationIssue(
-                        check="cross_ref_validity",
-                        severity="warning" if is_skipped else "error",
-                        chunk_id=chunk.chunk_id,
-                        message=f"Cross-reference target not found: '{ref}'"
-                            + (" (skipped section)" if is_skipped else ""),
-                        details={"target": ref, "skipped": is_skipped},
-                    )
+                continue  # resolved
+
+            # Strategy 4: suffix-segment match — extract the segment after
+            # the last "::" in the reference and check if any chunk ID
+            # contains "::suffix::" or ends with "::suffix".  This handles
+            # hierarchical IDs like "tm9-8014-m38a1::69" resolving to
+            # "tm9-8014-m38a1::1::IV::69".
+            ref_parts = ref.split("::")
+            if len(ref_parts) >= 2:
+                suffix = ref_parts[-1]
+                segment_pattern = f"::{suffix}::"
+                segment_end = f"::{suffix}"
+                if any(
+                    segment_pattern in cid or cid.endswith(segment_end)
+                    for cid in all_chunk_ids
+                ):
+                    continue  # resolved via suffix-segment match
+
+            # Strategy 5: content-text probe — when a paragraph reference
+            # (like "manual::69") can't resolve by chunk ID, check if
+            # the bare paragraph marker (e.g., "69. ") appears at the
+            # start of a line in a *different* chunk's text.  This handles
+            # small paragraphs that were merged into adjacent chunks
+            # during assembly.  The line-start requirement prevents false
+            # matches on inline text like "See paragraph 69."
+            if len(ref_parts) >= 2:
+                bare_id = ref_parts[-1]
+                # Probe pattern: "69. " at start of line (paragraph heading)
+                probe_pat = re.compile(rf"(?:^|\n){re.escape(bare_id)}\.\s")
+                if any(
+                    probe_pat.search(c.text)
+                    for c in chunks
+                    if c.chunk_id != chunk.chunk_id
+                ):
+                    continue  # resolved via content-text probe
+
+            is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
+
+            # Determine severity: skipped sections always get "warning";
+            # otherwise use the profile's cross_ref_unresolved_severity
+            # (defaults to "error", but profiles with sparse paragraph
+            # numbering can set it to "warning").
+            if is_skipped:
+                severity = "warning"
+            elif profile and profile.cross_ref_unresolved_severity:
+                severity = profile.cross_ref_unresolved_severity
+            else:
+                severity = "error"
+
+            issues.append(
+                ValidationIssue(
+                    check="cross_ref_validity",
+                    severity=severity,
+                    chunk_id=chunk.chunk_id,
+                    message=f"Cross-reference target not found: '{ref}'"
+                        + (" (skipped section)" if is_skipped else ""),
+                    details={"target": ref, "skipped": is_skipped},
                 )
+            )
 
     return issues
 

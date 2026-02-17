@@ -4,7 +4,7 @@
 
 Smart Chunking Pipeline for Vehicle Service Manual RAG. Processes OCR'd vehicle service manuals (PDF) into chunked, metadata-enriched vectors for a repair/troubleshooting chatbot.
 
-**Current state**: Fully implemented — all 349 tests pass. Built TDD-style, then hardened through architectural review remediation (15 work items). Profile schema is versioned (v1.0) with typed dataclasses and expanded validation. All pipeline modules use structured logging.
+**Current state**: Multi-manual pipeline complete — 522 tests pass. 5 production profiles validated and QA-passing (XJ-1999, CJ Universal, TM9-8014, TM9-8015-1, TM9-8015-2). Built TDD-style, then hardened through architectural review remediation (15 work items), output quality hardening (4 phases), and multi-manual extension (Phases 5-9: pipeline code fixes, 4 new production profiles, cross-ref partial-path matching, regex substitutions, character-spacing collapse). Profile schema is versioned (v1.0) with typed dataclasses and expanded validation. All pipeline modules use structured logging. Chatbot integration layer (PRD Phase 6) and Docker deployment not yet started.
 
 ## Quick Reference
 
@@ -26,6 +26,18 @@ pytest -v --tb=short
 ## Code Layout
 
 ```
+data/                  # Source PDFs (not committed — local only)
+  99 XJ Service Manual.pdf
+  53-71 CJ5 Service Manual.pdf
+  TM9-8014.pdf
+  TM9-8015-1.pdf, TM9-8015-2.pdf
+  M38A1wiring.pdf, ORD_SNL_G-758.pdf
+profiles/              # Production YAML profiles (5 files, validated against real PDFs)
+  xj-1999.yaml         # Jeep XJ 1999 — 39 known_ids, 2,137 chunks
+  cj-universal.yaml    # Jeep CJ 1953-71 — 28 known_ids, 521 chunks
+  tm9-8014.yaml        # M38A1 operator manual — 4 chapter known_ids, 83 chunks
+  tm9-8015-1.yaml      # M38A1 engine/clutch — 21 known_ids, 64 chunks
+  tm9-8015-2.yaml      # M38A1 power train/body — 58 known_ids, 135 chunks
 schema/                # JSON Schema for profile YAML format
   manual_profile_v1.schema.json
 src/pipeline/          # All source code
@@ -38,9 +50,9 @@ src/pipeline/          # All source code
   qa.py                # 7-check validation suite
   cli.py               # CLI entry point (process, bootstrap-profile, validate, validate-chunks, qa)
 
-tests/                 # Test suite (349 tests)
+tests/                 # Test suite (522 tests passing)
   conftest.py          # Shared fixtures — profile paths, sample texts, chunk helpers
-  fixtures/            # YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid)
+  fixtures/            # YAML test profiles (xj_1999, cj_universal, tm9_8014, invalid) — minimal, for unit tests
   test_*.py            # One test file per source module
 ```
 
@@ -48,15 +60,20 @@ tests/                 # Test suite (349 tests)
 
 Four-stage pipeline, each driven by a YAML manual profile:
 
-1. **OCR Cleanup** (`ocr_cleanup.py`) — Profile-specific substitutions, header/footer stripping, garbage line detection, unicode normalization
-2. **Structural Parsing** (`structural_parser.py`) — Regex-based boundary detection per profile hierarchy, manifest generation with chunk IDs in format `{manual_id}::{level1}::{level2}::...`
-3. **Chunk Assembly** (`chunk_assembly.py`) — 8 universal rules (R1-R8): primary unit, size targets (200-2000 tokens), never split steps, safety attachment, table integrity, merge small, crossref merge, figure continuity
+1. **OCR Cleanup** (`ocr_cleanup.py`) — Profile-specific substitutions (literal and regex), header/footer stripping, garbage line detection, **character-spacing collapse** (`collapse_spaced_chars` for OCR that inserts spaces between every letter), unicode normalization
+2. **Structural Parsing** (`structural_parser.py`) — Regex-based boundary detection per profile hierarchy, **known_ids filtering** (require_known_id drops unrecognized L1 boundaries), **boundary post-filtering** (min_gap_lines, min_content_words, require_blank_before), per-pass filter logging, manifest generation with chunk IDs in format `{manual_id}::{level1}::{level2}::...`
+3. **Chunk Assembly** (`chunk_assembly.py`) — 8 universal rules (R1-R8): primary unit, size targets (200-2000 tokens), never split steps, safety attachment, table integrity, merge small, crossref merge, figure continuity. Cross-references namespace-qualified with `{manual_id}::` prefix.
 4. **Embedding & Indexing** (`embeddings.py`) — Hierarchical header + first 150 words as embedding input, Qdrant vector store, SQLite secondary index
+
+**Cross-reference resolution** (`qa.py`) uses 5 strategies: exact chunk-ID match, boundary-ID match, prefix sub-ID match (e.g., `8A` matches `8A::SP`), suffix-segment partial-path match (for cross-manual short-form refs), and content-text probe (searches chunk text for merged paragraph numbers).
+
+**Not yet implemented:** LLM-assisted parsing fallback (PRD 4.3.2), LLM profile bootstrapping (PRD Phase 5 — CLI stub exists), Docker Compose deployment (PRD 7.2), chatbot integration (PRD Phase 6).
 
 ## Key Data Types
 
-- `ManualProfile` (profile.py) — Loaded from YAML, contains hierarchy patterns, vehicle info, OCR rules, safety callout patterns. Schema versioned (`schema_version: "1.0"`)
-- `OcrCleanupConfig` (profile.py) — Typed OCR cleanup configuration (quality_estimate, known_substitutions, header_footer_patterns, garbage_detection)
+- `ManualProfile` (profile.py) — Loaded from YAML, contains hierarchy patterns, vehicle info, OCR rules, safety callout patterns, skip_sections, cross_ref_unresolved_severity (error|warning). Schema versioned (`schema_version: "1.0"`)
+- `HierarchyLevel` (profile.py) — Single hierarchy level with patterns, known_ids, and filtering config (require_known_id, min_gap_lines, min_content_words, require_blank_before)
+- `OcrCleanupConfig` (profile.py) — Typed OCR cleanup configuration (quality_estimate, known_substitutions, regex_substitutions, header_footer_patterns, garbage_detection, collapse_spaced_chars)
 - `GarbageDetectionConfig` (profile.py) — Garbage line detection parameters (enabled, threshold)
 - `ContentTypeConfig` (profile.py) — Content type metadata (maintenance_schedule, wiring_diagrams, specification_tables)
 - `VariantConfig` (profile.py) — Market variant configuration (has_market_variants, variant_indicator, markets)
@@ -64,6 +81,7 @@ Four-stage pipeline, each driven by a YAML manual profile:
 - `PageRange` / `LineRange` (structural_parser.py) — Typed range dataclasses for manifest entries
 - `Manifest` / `ManifestEntry` (structural_parser.py) — Hierarchical document map with chunk boundaries
 - `CleanedPage` (ocr_cleanup.py) — Cleaned page with original text, cleaned text, garbage lines, substitution count
+- `OCRQualityReport` (ocr_cleanup.py) — Quality assessment (dictionary_match_rate, garbage_line_rate, needs_reocr)
 - `Chunk` (chunk_assembly.py) — Final chunk with text, metadata dict, chunk_id, manual_id
 - `QueryAnalysis` / `RetrievalResult` (retrieval.py) — Query parsing and retrieval types
 - `ValidationReport` / `ValidationIssue` (qa.py) — QA validation results
@@ -75,7 +93,8 @@ Four-stage pipeline, each driven by a YAML manual profile:
 - Type hints throughout
 - Tests use pytest with class-based grouping (`class TestXxx`)
 - Test markers: `unit`, `integration`, `slow`
-- Profile fixtures are simplified versions of the full PRD profiles (fewer vehicles/known_ids)
+- **Test fixtures** (`tests/fixtures/`) are minimal YAML profiles for unit tests — fewer vehicles, fewer known_ids, simplified patterns. Never modified during production profile work.
+- **Production profiles** (`profiles/`) are complete, tuned against real PDFs, and validated via QA. Each has a dedicated regression test class in `test_profile.py`.
 
 ## Dependencies
 

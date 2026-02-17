@@ -1,0 +1,201 @@
+schema_version: "1.0"
+manual_id: "cj-universal-53-71"
+manual_title: "1953-71 Jeep Universal Series Service Manual (SM-1046)"
+source_url: "https://example.com/cj-manual.pdf"
+source_format: "pdf-ocr"
+
+vehicles:
+  - model: "CJ-3B"
+    years: "1953-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane", "four cylinder", "F4", "134 cubic inch"]
+  - model: "CJ-5"
+    years: "1955-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane", "four cylinder", "F4"]
+      - name: "Dauntless V-6 225"
+        code: "V6"
+        aliases: ["V-6", "V6", "Dauntless", "V-6 225", "225", "V6-225"]
+  - model: "CJ-5A"
+    years: "1965-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+      - name: "Dauntless V-6 225"
+        code: "V6"
+        aliases: ["V-6", "V6", "Dauntless"]
+  - model: "CJ-6"
+    years: "1955-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+      - name: "Dauntless V-6 225"
+        code: "V6"
+        aliases: ["V-6", "V6", "Dauntless"]
+  - model: "CJ-6A"
+    years: "1965-1971"
+    drive_type: ["4WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+      - name: "Dauntless V-6 225"
+        code: "V6"
+        aliases: ["V-6", "V6", "Dauntless"]
+  - model: "DJ-5"
+    years: "1965-1971"
+    drive_type: ["2WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+  - model: "DJ-6"
+    years: "1965-1971"
+    drive_type: ["2WD"]
+    engines:
+      - name: "Hurricane F4-134"
+        code: "F4"
+        aliases: ["F4-134", "Hurricane"]
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "section"
+      # Matches standalone section letter (A-U) optionally followed by digit (D1, F1, F2, J1)
+      # on its own line. The $ anchor prevents matching lines where a capital letter
+      # starts a sentence (e.g., "A description of...").
+      # OCR renders compound IDs as both "D1" and "Dl" (lowercase L).
+      # min_gap_lines filters out running headers that repeat the section letter
+      # on every even page (~100 lines apart); real sections are 270+ lines apart.
+      id_pattern: "^([A-Z][1-2l]?)$"
+      title_pattern: null
+      require_known_id: true
+      min_gap_lines: 500
+      require_blank_before: true
+      known_ids:
+        - { id: "A", title: "General Data" }
+        - { id: "B", title: "Lubrication" }
+        - { id: "C", title: "Tune-Up" }
+        - { id: "D", title: "Hurricane F4 Engine" }
+        - { id: "D1", title: "Dauntless V-6 Engine" }
+        - { id: "Dl", title: "Dauntless V-6 Engine" }
+        - { id: "E", title: "Fuel System" }
+        - { id: "F", title: "Exhaust System" }
+        - { id: "F1", title: "Exhaust Emission Control (F4)" }
+        - { id: "Fl", title: "Exhaust Emission Control (F4)" }
+        - { id: "F2", title: "Exhaust Emission Control (V6)" }
+        - { id: "G", title: "Cooling System" }
+        - { id: "H", title: "Electrical" }
+        - { id: "I", title: "Clutch" }
+        - { id: "J", title: "3-Speed Transmission" }
+        - { id: "J1", title: "4-Speed Transmission" }
+        - { id: "Jl", title: "4-Speed Transmission" }
+        - { id: "K", title: "Transfer Case" }
+        - { id: "L", title: "Propeller Shafts" }
+        - { id: "M", title: "Front Axle" }
+        - { id: "N", title: "Rear Axle" }
+        - { id: "O", title: "Steering" }
+        - { id: "P", title: "Brakes" }
+        - { id: "Q", title: "Wheels" }
+        - { id: "R", title: "Frame" }
+        - { id: "S", title: "Springs and Shock Absorbers" }
+        - { id: "T", title: "Body" }
+        - { id: "U", title: "Miscellaneous" }
+    - level: 2
+      name: "paragraph"
+      # Matches paragraph IDs like "A-1.", "B-7.", "D1-5.", "Dl-38.", "Fl-10.", "0-5." (O->0 OCR)
+      # OCR renders I as 1 (section I paragraphs appear as "1-1.") and O as 0 ("0-5.")
+      # Pattern allows title on same line (A-1. GENERAL) or next line (B-66.\n Title)
+      id_pattern: "^([A-Z0-9][A-Za-z0-9]?-\\d+)\\."
+      title_pattern: "^[A-Z0-9][A-Za-z0-9]?-\\d+\\.\\s+(.+)"
+      min_content_words: 20
+      require_blank_before: false
+    - level: 3
+      name: "sub-paragraph"
+      id_pattern: null
+      title_pattern: null
+  page_number:
+    pattern: "^(\\d+)$"
+    group_prefixed: false
+  step_patterns:
+    - "^([a-z])\\.\\s"
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "(?:FIG|Fig)\\.\\s*([A-Z0-9][A-Za-z0-9]?-\\d+)"
+    scope: "per-section"
+  cross_reference:
+    patterns:
+      - "Refer to Par\\.\\s+([A-Z0-9][A-Za-z0-9]?-\\d+)"
+      - "(?:See|Refer to)\\s+Section\\s+([A-Z]\\d?)"
+
+safety_callouts:
+  - level: "caution"
+    pattern: "^Caution:"
+    style: "inline"
+  - level: "note"
+    pattern: "^Note:"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: true
+    structure: "interval-table"
+    description: "Single service maintenance schedule as a table."
+  wiring_diagrams:
+    present: true
+    section_id: "H"
+  specification_tables:
+    location: "end-of-section"
+
+ocr_cleanup:
+  quality_estimate: "fair"
+  collapse_spaced_chars: true
+  known_substitutions:
+    # Common OCR misrecognitions found in the manual
+    - { from: "DHTfl", to: "DATA" }
+    - { from: "EXHHUST", to: "EXHAUST" }
+    - { from: "CONTOL", to: "CONTROL" }
+    - { from: "SPECIFICHTIONS", to: "SPECIFICATIONS" }
+    - { from: "REfiR", to: "REAR" }
+    - { from: "flXLE", to: "AXLE" }
+    - { from: "MISCEIiLaNEOUS", to: "MISCELLANEOUS" }
+    - { from: "vheicle", to: "vehicle" }
+    - { from: "carefullly", to: "carefully" }
+  regex_substitutions:
+    # Normalize 'Jeep' quote variants in headers
+    - { pattern: "'Jeep[*']?", replacement: "'Jeep'" }
+    - { pattern: "\\*Jeep[*']?", replacement: "'Jeep'" }
+    # Fix OCR rendering section K as 'ft'
+    - { pattern: "^ft$", replacement: "K" }
+    # Fix lowercase section letters that appear on even pages (running headers)
+    # These are handled by collapse_spaced_chars and require_known_id, but
+    # explicit subs help with the paragraph IDs
+    - { pattern: "\\bOfl\\b", replacement: "Oil" }
+    - { pattern: "\\bHear\\b", replacement: "Rear" }
+  header_footer_patterns:
+    # Odd pages: 'Jeep' UNIVERSAL SERIES SERVICE MANUAL (with OCR variations)
+    - "^'?Jeep[*']?\\s+U\\s*N\\s*I\\s*V\\s*E\\s*R\\s*S\\s*A\\s*L"
+    - "^\\*?Jeep[?']?\\s+U\\s*N\\s*I\\s*V\\s*E\\s*R\\s*S\\s*A\\s*L"
+    # Even pages: section letter + spaced section name (running header)
+    # e.g., "B  L U B R I C A T I O N" or "D  H U R R I C A N E F4 E N G I N E"
+    # These are captured as L1 boundaries by require_known_id, so we strip the
+    # repeated running-header form that appears on non-contents even pages
+    - "^S\\s*E\\s*R\\s*I\\s*E\\s*S\\s+S\\s*E\\s*R\\s*V\\s*I\\s*C\\s*E\\s+MANUAL"
+  garbage_detection:
+    enabled: true
+    threshold: 0.4
+
+variants:
+  has_market_variants: false
+  variant_indicator: "none"
+  markets: ["US"]

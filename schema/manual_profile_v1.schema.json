@@ -285,6 +285,24 @@
           },
           "description": "Known OCR misrecognitions and their corrections."
         },
+        "regex_substitutions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["pattern", "replacement"],
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "Regex pattern to match OCR errors."
+              },
+              "replacement": {
+                "type": "string",
+                "description": "Replacement string (may use regex backreferences like \\1)."
+              }
+            }
+          },
+          "description": "Regex-based OCR substitution rules. Applied in order after known_substitutions."
+        },
         "header_footer_patterns": {
           "type": "array",
           "items": { "type": "string" },
@@ -304,6 +322,11 @@
               "description": "Non-ASCII character ratio above which a line is considered garbage."
             }
           }
+        },
+        "collapse_spaced_chars": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, collapse sequences of 3+ single uppercase characters separated by spaces (e.g., 'H U R R I C A N E' becomes 'HURRICANE'). Useful for OCR'd manuals where headings have character-level spacing."
         }
       }
     },
@@ -331,6 +354,12 @@
       "items": { "type": "string" },
       "default": [],
       "description": "Level-1 section IDs to exclude from chunk assembly (e.g., ['8W'] to skip wiring diagrams)."
+    },
+    "cross_ref_unresolved_severity": {
+      "type": "string",
+      "enum": ["error", "warning"],
+      "default": "error",
+      "description": "Severity level for unresolved cross-references. Set to 'warning' for manuals where paragraph-numbered cross-references are pervasive but most paragraphs are not structural boundaries (e.g., military TMs with image-only chapters)."
     }
   }
 }

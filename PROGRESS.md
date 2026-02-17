@@ -1,7 +1,7 @@
 # Progress Log
 
 **Started:** 2026-02-15
-**Completed:** 2026-02-16
+**Last Updated:** 2026-02-17
 
 ## Completed Work Items
 
@@ -45,9 +45,37 @@
 | 2026-02-16 | Phase 2: Production XJ profile (2.1-2.2) | profiles/xj-1999.yaml (new), tests/test_profile.py | 6 new tests |
 | 2026-02-16 | Phase 4: End-to-end validation (4.1-4.5) | src/pipeline/qa.py | 0 new tests (validation + tuning) |
 
+### Multi-Manual Pipeline Code Fixes (Implementation Plan v4, Phase 5)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 5.1: Cross-reference partial-path matching | src/pipeline/qa.py, tests/test_qa.py | 4 new tests |
+| 2026-02-17 | Phase 5.2: Regex-based OCR substitution support | src/pipeline/profile.py, src/pipeline/ocr_cleanup.py, schema/manual_profile_v1.schema.json, tests/test_ocr_cleanup.py, tests/test_profile.py | 5 new tests |
+| 2026-02-17 | Phase 5.3: Character-spacing collapse pre-processor | src/pipeline/profile.py, src/pipeline/ocr_cleanup.py, schema/manual_profile_v1.schema.json, tests/test_ocr_cleanup.py | 4 new tests |
+| 2026-02-17 | Phase 5.4: Per-pass filter logging | src/pipeline/structural_parser.py, tests/test_structural_parser.py | 0 new tests (logging only) |
+
+### Production Profile Creation (Implementation Plan v4, Phases 6-8)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 6.1: Create production CJ universal profile | profiles/cj-universal.yaml (new), tests/test_profile.py | 11 new tests (28 known_ids) |
+| 2026-02-17 | Phase 7.1: Create production TM9-8014 profile | profiles/tm9-8014.yaml (new), tests/test_profile.py | 12 new tests (4 chapter known_ids, 42 OCR subs) |
+| 2026-02-17 | Phase 8.1: Create TM9-8015-2 profile | profiles/tm9-8015-2.yaml (new), tests/test_profile.py | 14 new tests (58 L1 sections) |
+| 2026-02-17 | Phase 6.2: Validate CJ pipeline against real PDF | profiles/cj-universal.yaml, src/pipeline/qa.py, tests/test_profile.py | 521 chunks, 0 errors, 0.4% undersized. L1 end-of-line anchor, min_gap_lines=500 |
+| 2026-02-17 | Phase 7.2: Validate TM9-8014 pipeline against real PDF | src/pipeline/profile.py, src/pipeline/qa.py, schema/manual_profile_v1.schema.json, profiles/tm9-8014.yaml | 83 chunks, 0 errors. Added cross_ref_unresolved_severity field |
+| 2026-02-17 | Phase 8.2: Create TM9-8015-1 profile and validate | profiles/tm9-8015-1.yaml (new), tests/test_profile.py | 64 chunks, 0 errors, 58 warnings. Poorest OCR, 35 OCR subs, 19 regression tests |
+
+### Multi-Manual Regression Suite (Implementation Plan v4, Phase 9)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 9.1: Profile discovery test | tests/test_profile.py | 10 parametrized invariant checks across all 5 profiles (50 test cases) |
+| 2026-02-17 | Phase 9.2: CLI validation report grouping | src/pipeline/cli.py, tests/test_cli.py | `--summary-only` flag, `_format_validation_summary()`, 10 new tests |
+| 2026-02-17 | Phase 9.3: Documentation finalization | CLAUDE.md, PROGRESS.md, LEARNINGS.md, IMPLEMENTATION_PLAN.md | All docs updated to final state |
+
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests). Full test suite: **439 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus multi-manual extension (Phases 5-9: 15 work items, all complete). 5 production profiles created and validated (XJ-1999, CJ universal, TM9-8014, TM9-8015-2, TM9-8015-1). All 5 manuals QA-passing. Phase 9 added profile discovery tests (10 parametrized invariants across all profiles), CLI validation summary grouping with `--summary-only` flag, and documentation finalization. Full test suite: **582 tests passing** (607 collected, 25 integration-deselected; up from 250 baseline).
 
 ### Output Quality Results (XJ 1999 Service Manual)
 
@@ -62,3 +90,39 @@ All 6 original phases implemented, plus schema stability and documentation impro
 | QA passed | False | **True** | **True** |
 
 No `NotImplementedError` remains in any source module.
+
+---
+
+## Final Completion Summary (2026-02-17)
+
+### Pipeline Status: Multi-Manual Support Complete
+
+The chunking pipeline now processes 5 vehicle service manuals from 3 distinct document families, all QA-passing:
+
+| Manual | Profile | Pages | Chunks | Errors | Warnings | Key Challenge |
+|--------|---------|-------|--------|--------|----------|---------------|
+| 1999 Jeep XJ Service Manual | xj-1999.yaml | 1,948 | 2,137 | 0 | 9 | 39 Chrysler group IDs, 8W wiring diagram skips |
+| 1953-71 CJ Universal Service Manual | cj-universal.yaml | 376 | 521 | 0 | 2 | Running-header false positives, spaced-character OCR |
+| TM9-8014 M38A1 Operator Manual | tm9-8014.yaml | 391 | 83 | 0 | 208 | Image-only chapters, sparse paragraph numbering |
+| TM9-8015-1 M38A1 Engine/Clutch | tm9-8015-1.yaml | 188 | 64 | 0 | 58 | Worst OCR quality, garbled Roman numerals |
+| TM9-8015-2 M38A1 Power Train/Body | tm9-8015-2.yaml | 338 | 135 | 0 | 2 | 58 L1 sections, dense military structure |
+
+### Development Arc
+
+| Phase | Date | Focus | Tests After |
+|-------|------|-------|-------------|
+| Original build (Phases 1-6) | 2026-02-15 | Core pipeline, TDD | 229 |
+| Schema stability + docs | 2026-02-15 | Typed profiles, validation | 250 |
+| REVIEW.md remediation (15 items) | 2026-02-16 | Contracts, persistence, logging | 349 |
+| Output quality (Phases 1-4) | 2026-02-16 | known_ids, cross-ref, XJ profile | 439 |
+| Multi-manual code fixes (Phase 5) | 2026-02-17 | Partial-path, regex subs, char-spacing | 465 |
+| Production profiles (Phases 6-8) | 2026-02-17 | 4 new profiles, real-PDF validation | 522 |
+| Regression suite + docs (Phase 9) | 2026-02-17 | Profile discovery tests, CLI summary, docs | 582 |
+
+### What Remains (Future Work)
+
+All 9 implementation plan phases (15 work items in Phases 5-9) are complete. Remaining work is from the original PRD and was explicitly out of scope for this implementation plan:
+
+- **PRD Phase 5**: LLM-assisted profile bootstrapping (CLI stub exists)
+- **PRD Phase 6**: Chatbot integration layer
+- **PRD 7.2**: Docker Compose deployment

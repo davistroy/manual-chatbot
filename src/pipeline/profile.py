@@ -81,8 +81,10 @@ class OcrCleanupConfig:
     """OCR cleanup configuration from manual profile."""
     quality_estimate: str = ""
     known_substitutions: list[dict[str, str]] = field(default_factory=list)
+    regex_substitutions: list[dict[str, str]] = field(default_factory=list)
     header_footer_patterns: list[str] = field(default_factory=list)
     garbage_detection: GarbageDetectionConfig = field(default_factory=GarbageDetectionConfig)
+    collapse_spaced_chars: bool = False
 
 
 @dataclass
@@ -114,6 +116,7 @@ class ManualProfile:
     ocr_cleanup: OcrCleanupConfig
     variants: VariantConfig
     skip_sections: list[str] = field(default_factory=list)
+    cross_ref_unresolved_severity: str = "error"
 
 
 def _parse_content_types(data: dict[str, Any]) -> ContentTypeConfig:
@@ -129,11 +132,13 @@ def _parse_ocr_cleanup(data: dict[str, Any]) -> OcrCleanupConfig:
     return OcrCleanupConfig(
         quality_estimate=data.get("quality_estimate", ""),
         known_substitutions=data.get("known_substitutions", []),
+        regex_substitutions=data.get("regex_substitutions", []),
         header_footer_patterns=data.get("header_footer_patterns", []),
         garbage_detection=GarbageDetectionConfig(
             enabled=gd.get("enabled", False),
             threshold=gd.get("threshold", 0.5),
         ),
+        collapse_spaced_chars=data.get("collapse_spaced_chars", False),
     )
 
 
@@ -255,6 +260,7 @@ def load_profile(path: str | Path) -> ManualProfile:
         ocr_cleanup=_parse_ocr_cleanup(data.get("ocr_cleanup", {})),
         variants=_parse_variants(data.get("variants", {})),
         skip_sections=data.get("skip_sections", []),
+        cross_ref_unresolved_severity=data.get("cross_ref_unresolved_severity", "error"),
     )
 
 
@@ -335,6 +341,28 @@ def validate_profile(profile: ManualProfile) -> list[str]:
             errors.append(
                 f"known_substitutions[{i}] must have 'from' and 'to' keys."
             )
+
+    # Validate OCR regex_substitutions structure and patterns
+    for i, sub in enumerate(profile.ocr_cleanup.regex_substitutions):
+        if "pattern" not in sub or "replacement" not in sub:
+            errors.append(
+                f"regex_substitutions[{i}] must have 'pattern' and 'replacement' keys."
+            )
+        elif sub["pattern"]:
+            try:
+                re.compile(sub["pattern"])
+            except re.error as e:
+                errors.append(
+                    f"Invalid regex_substitutions[{i}] pattern: {e}"
+                )
+
+    # Validate cross_ref_unresolved_severity
+    valid_severities = {"error", "warning"}
+    if profile.cross_ref_unresolved_severity not in valid_severities:
+        errors.append(
+            f"cross_ref_unresolved_severity '{profile.cross_ref_unresolved_severity}' "
+            f"is not valid. Must be one of: {', '.join(sorted(valid_severities))}."
+        )
 
     # Validate safety callout levels and styles
     valid_callout_levels = {"warning", "caution", "note"}

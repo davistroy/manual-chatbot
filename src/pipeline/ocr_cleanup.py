@@ -35,6 +35,18 @@ class OCRQualityReport:
     needs_reocr: bool
 
 
+def collapse_spaced_characters(text: str) -> str:
+    """Collapse 'H U R R I C A N E' to 'HURRICANE'.
+
+    Matches sequences of 3+ single uppercase characters separated by
+    single spaces. Preserves surrounding whitespace/punctuation.
+    """
+    def _collapse(match: re.Match) -> str:
+        return match.group(0).replace(" ", "")
+
+    return re.sub(r'\b([A-Z] ){2,}[A-Z]\b', _collapse, text)
+
+
 def apply_known_substitutions(text: str, substitutions: list[dict[str, str]]) -> str:
     """Apply manual-specific OCR substitution rules.
 
@@ -47,6 +59,27 @@ def apply_known_substitutions(text: str, substitutions: list[dict[str, str]]) ->
     """
     for sub in substitutions:
         text = text.replace(sub["from"], sub["to"])
+    return text
+
+
+def apply_regex_substitutions(
+    text: str,
+    substitutions: list[dict[str, str]],
+) -> str:
+    """Apply regex-based OCR substitution rules.
+
+    Each entry must have 'pattern' and 'replacement' keys. Patterns are
+    applied in order using ``re.sub()``.
+
+    Args:
+        text: The text to clean.
+        substitutions: List of {pattern, replacement} substitution dicts.
+
+    Returns:
+        Text with all regex substitutions applied.
+    """
+    for sub in substitutions:
+        text = re.sub(sub["pattern"], sub["replacement"], text)
     return text
 
 
@@ -156,22 +189,34 @@ def clean_page(page_text: str, page_number: int, profile: ManualProfile) -> Clea
     """Run the full cleanup pipeline on a single page.
 
     Applies in order:
+    0. Character-spacing collapse (if enabled)
     1. Known substitutions
+    1b. Regex substitutions
     2. Header/footer stripping
     3. Garbage detection
     4. Universal normalization
     """
     ocr_config = profile.ocr_cleanup
 
+    # 0. Collapse spaced characters (if enabled) — must run FIRST
+    text = page_text
+    if ocr_config.collapse_spaced_chars:
+        text = collapse_spaced_characters(text)
+
     # 1. Apply known substitutions
     substitutions = ocr_config.known_substitutions
-    text = apply_known_substitutions(page_text, substitutions)
+    text = apply_known_substitutions(text, substitutions)
 
     # Count how many substitutions were actually applied
     sub_count = 0
     for sub in substitutions:
         count = page_text.count(sub["from"])
         sub_count += count
+
+    # 1b. Apply regex substitutions
+    regex_substitutions = ocr_config.regex_substitutions
+    if regex_substitutions:
+        text = apply_regex_substitutions(text, regex_substitutions)
 
     # 2. Strip headers/footers
     header_footer_patterns = ocr_config.header_footer_patterns
