@@ -259,6 +259,45 @@ class TestLoadProfileOCRCleanup:
         profile = load_profile(tm9_profile_path)
         assert profile.ocr_cleanup.garbage_detection.threshold == 0.3
 
+    def test_regex_substitutions_defaults_to_empty_list(self, xj_profile_path: Path):
+        """Profiles without regex_substitutions should default to empty list."""
+        profile = load_profile(xj_profile_path)
+        assert profile.ocr_cleanup.regex_substitutions == []
+
+    def test_regex_substitutions_loaded_from_yaml(self, tmp_path: Path):
+        """Regex substitutions are correctly loaded from YAML."""
+        yaml_content = """\
+schema_version: "1.0"
+manual_id: "test-regex"
+manual_title: "Test Regex Substitutions"
+source_url: "https://example.com/test.pdf"
+source_format: "pdf-ocr"
+vehicles:
+  - model: "Test"
+    years: "2000"
+    drive_type: ["2WD"]
+structure:
+  hierarchy:
+    - level: 1
+      name: "chapter"
+      id_pattern: "^CHAPTER (\\\\d+)"
+      title_pattern: null
+safety_callouts: []
+content_types: {}
+ocr_cleanup:
+  quality_estimate: "poor"
+  regex_substitutions:
+    - { pattern: "\\\\bZn", replacement: "In" }
+    - { pattern: "CHAPTEa", replacement: "CHAPTER" }
+variants: {}
+"""
+        p = tmp_path / "test_regex.yaml"
+        p.write_text(yaml_content, encoding="utf-8")
+        profile = load_profile(p)
+        assert len(profile.ocr_cleanup.regex_substitutions) == 2
+        assert profile.ocr_cleanup.regex_substitutions[0]["pattern"] == "\\bZn"
+        assert profile.ocr_cleanup.regex_substitutions[0]["replacement"] == "In"
+
 
 # ── Validation Tests ──────────────────────────────────────────────
 
@@ -374,6 +413,43 @@ class TestExpandedValidation:
         profile = load_profile(xj_profile_path)
         errors = validate_profile(profile)
         assert not any("known_substitutions" in e for e in errors)
+
+    def test_invalid_regex_substitution_pattern(self, xj_profile_path: Path):
+        """Invalid regex in regex_substitutions raises validation error."""
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.regex_substitutions = [
+            {"pattern": "[invalid(", "replacement": "fixed"}
+        ]
+        errors = validate_profile(profile)
+        assert any("regex_substitutions[0]" in e for e in errors)
+
+    def test_regex_substitution_missing_pattern_key(self, xj_profile_path: Path):
+        """regex_substitutions entry missing 'pattern' key raises validation error."""
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.regex_substitutions = [
+            {"replacement": "fixed"}
+        ]
+        errors = validate_profile(profile)
+        assert any("regex_substitutions[0]" in e for e in errors)
+
+    def test_regex_substitution_missing_replacement_key(self, xj_profile_path: Path):
+        """regex_substitutions entry missing 'replacement' key raises validation error."""
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.regex_substitutions = [
+            {"pattern": r"\bZn"}
+        ]
+        errors = validate_profile(profile)
+        assert any("regex_substitutions[0]" in e for e in errors)
+
+    def test_valid_regex_substitutions_pass(self, xj_profile_path: Path):
+        """Valid regex_substitutions produce no validation errors."""
+        profile = load_profile(xj_profile_path)
+        profile.ocr_cleanup.regex_substitutions = [
+            {"pattern": r"\bZn", "replacement": "In"},
+            {"pattern": r"CHAPTEa", "replacement": "CHAPTER"},
+        ]
+        errors = validate_profile(profile)
+        assert not any("regex_substitutions" in e for e in errors)
 
     def test_non_sequential_hierarchy_levels(self, xj_profile_path: Path):
         profile = load_profile(xj_profile_path)

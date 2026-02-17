@@ -8,8 +8,10 @@ from pipeline.ocr_cleanup import (
     CleanedPage,
     OCRQualityReport,
     apply_known_substitutions,
+    apply_regex_substitutions,
     assess_quality,
     clean_page,
+    collapse_spaced_characters,
     detect_garbage_lines,
     normalize_unicode,
     strip_headers_footers,
@@ -83,6 +85,96 @@ class TestApplyKnownSubstitutions:
             [{"from": "IJURY", "to": "INJURY"}],
         )
         assert result == "INJURY here and INJURY there"
+
+
+# ── Regex Substitutions Tests ────────────────────────────────────
+
+
+class TestApplyRegexSubstitutions:
+    """Test regex-based OCR substitution rules."""
+
+    def test_single_regex_substitution(self):
+        result = apply_regex_substitutions(
+            "Znstallation of the Znterference fit",
+            [{"pattern": r"\bZn", "replacement": "In"}],
+        )
+        assert result == "Installation of the Interference fit"
+
+    def test_multiple_regex_substitutions_applied_in_order(self):
+        result = apply_regex_substitutions(
+            "CHAPTEa 3 Generd",
+            [
+                {"pattern": r"CHAPTEa", "replacement": "CHAPTER"},
+                {"pattern": r"Generd", "replacement": "General"},
+            ],
+        )
+        assert result == "CHAPTER 3 General"
+
+    def test_no_match_returns_unchanged(self):
+        original = "Clean text without OCR errors"
+        result = apply_regex_substitutions(
+            original,
+            [{"pattern": r"XYZ\d+", "replacement": "ABC"}],
+        )
+        assert result == original
+
+    def test_empty_substitutions_list(self):
+        original = "Some text"
+        result = apply_regex_substitutions(original, [])
+        assert result == original
+
+    def test_backreference_in_replacement(self):
+        """Regex replacement can use backreferences like \\1."""
+        result = apply_regex_substitutions(
+            "AIR CWiiiER cleaned",
+            [{"pattern": r"CWiiiER", "replacement": "CLEANER"}],
+        )
+        assert result == "AIR CLEANER cleaned"
+
+
+class TestCleanPageRegexSubstitutions:
+    """Test that regex substitutions are applied within clean_page pipeline."""
+
+    def test_regex_subs_applied_in_clean_page(self, xj_profile_path):
+        """Regex substitutions are applied during clean_page when present in profile."""
+        profile = load_profile(xj_profile_path)
+        # Inject regex substitutions into the profile for testing
+        profile.ocr_cleanup.regex_substitutions = [
+            {"pattern": r"\bZnstall", "replacement": "Install"},
+        ]
+        result = clean_page("Znstallation procedure follows.", 1, profile)
+        assert "Installation" in result.cleaned_text
+        assert "Znstall" not in result.cleaned_text
+
+
+# ── Character-Spacing Collapse Tests ─────────────────────────────
+
+
+class TestCollapseSpacedCharacters:
+    """Test character-spacing collapse for OCR'd headings."""
+
+    def test_collapses_hurricane(self):
+        """H U R R I C A N E -> HURRICANE (3+ single uppercase chars)."""
+        result = collapse_spaced_characters("H U R R I C A N E")
+        assert result == "HURRICANE"
+
+    def test_preserves_punctuation_between_segments(self):
+        """F I G . D - 1 4 -> collapsed segments preserve punctuation."""
+        # The regex only collapses sequences of uppercase letters separated by
+        # spaces. Punctuation/digits break the sequence into separate segments.
+        # 'F I G' collapses to 'FIG'; the period and everything after stays.
+        result = collapse_spaced_characters("F I G . D - 1 4")
+        assert result == "FIG . D - 1 4"
+
+    def test_does_not_collapse_single_char_with_word(self):
+        """'A description' NOT collapsed (only 1 single-char, need 3+)."""
+        result = collapse_spaced_characters("A description")
+        assert result == "A description"
+
+    def test_does_not_collapse_two_chars(self):
+        """'I V' NOT collapsed (only 2 chars — below threshold of 3)."""
+        result = collapse_spaced_characters("I V")
+        assert result == "I V"
 
 
 # ── Header/Footer Stripping Tests ─────────────────────────────────

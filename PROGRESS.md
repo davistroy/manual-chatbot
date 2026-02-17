@@ -45,9 +45,18 @@
 | 2026-02-16 | Phase 2: Production XJ profile (2.1-2.2) | profiles/xj-1999.yaml (new), tests/test_profile.py | 6 new tests |
 | 2026-02-16 | Phase 4: End-to-end validation (4.1-4.5) | src/pipeline/qa.py | 0 new tests (validation + tuning) |
 
+### Multi-Manual Pipeline Code Fixes (Implementation Plan v4, Phase 5)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 5.1: Cross-reference partial-path matching | src/pipeline/qa.py, tests/test_qa.py | 4 new tests |
+| 2026-02-17 | Phase 5.2: Regex-based OCR substitution support | src/pipeline/profile.py, src/pipeline/ocr_cleanup.py, schema/manual_profile_v1.schema.json, tests/test_ocr_cleanup.py, tests/test_profile.py | 5 new tests |
+| 2026-02-17 | Phase 5.3: Character-spacing collapse pre-processor | src/pipeline/profile.py, src/pipeline/ocr_cleanup.py, schema/manual_profile_v1.schema.json, tests/test_ocr_cleanup.py | 4 new tests |
+| 2026-02-17 | Phase 5.4: Per-pass filter logging | src/pipeline/structural_parser.py, tests/test_structural_parser.py | 0 new tests (logging only) |
+
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests). Full test suite: **439 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests). Full test suite: **465 tests passing** (up from 250 baseline).
 
 ### Output Quality Results (XJ 1999 Service Manual)
 

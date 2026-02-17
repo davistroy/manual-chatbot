@@ -274,23 +274,40 @@ def check_cross_ref_validity(
             continue
 
         for ref in cross_refs:
-            # Check if the reference resolves to any known chunk ID or prefix.
-            # Also check string-prefix matching for group families (e.g.,
-            # "xj-1999::8" should match "xj-1999::8A", "xj-1999::8B", etc.)
-            if ref not in all_chunk_ids and ref not in all_prefixes and not any(
+            # Strategy 1-3: exact chunk ID, exact prefix, or string-prefix match
+            # (e.g., "xj-1999::8" matches "xj-1999::8A", "xj-1999::8B", etc.)
+            if ref in all_chunk_ids or ref in all_prefixes or any(
                 p.startswith(ref) for p in all_prefixes
             ):
-                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
-                issues.append(
-                    ValidationIssue(
-                        check="cross_ref_validity",
-                        severity="warning" if is_skipped else "error",
-                        chunk_id=chunk.chunk_id,
-                        message=f"Cross-reference target not found: '{ref}'"
-                            + (" (skipped section)" if is_skipped else ""),
-                        details={"target": ref, "skipped": is_skipped},
-                    )
+                continue  # resolved
+
+            # Strategy 4: suffix-segment match — extract the segment after
+            # the last "::" in the reference and check if any chunk ID
+            # contains "::suffix::" or ends with "::suffix".  This handles
+            # hierarchical IDs like "tm9-8014-m38a1::69" resolving to
+            # "tm9-8014-m38a1::1::IV::69".
+            ref_parts = ref.split("::")
+            if len(ref_parts) >= 2:
+                suffix = ref_parts[-1]
+                segment_pattern = f"::{suffix}::"
+                segment_end = f"::{suffix}"
+                if any(
+                    segment_pattern in cid or cid.endswith(segment_end)
+                    for cid in all_chunk_ids
+                ):
+                    continue  # resolved via suffix-segment match
+
+            is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
+            issues.append(
+                ValidationIssue(
+                    check="cross_ref_validity",
+                    severity="warning" if is_skipped else "error",
+                    chunk_id=chunk.chunk_id,
+                    message=f"Cross-reference target not found: '{ref}'"
+                        + (" (skipped section)" if is_skipped else ""),
+                    details={"target": ref, "skipped": is_skipped},
                 )
+            )
 
     return issues
 

@@ -207,6 +207,7 @@ def filter_boundaries(
             known_id_sets[h.level] = {entry["id"] for entry in h.known_ids}
 
     if known_id_sets:
+        before_pass0 = len(boundaries)
         filtered = []
         for b in boundaries:
             if b.level in known_id_sets:
@@ -214,9 +215,11 @@ def filter_boundaries(
                     continue  # rejected
             filtered.append(b)
         boundaries = filtered
+        logger.info("Pass 0 (known_id): %d -> %d boundaries", before_pass0, len(boundaries))
 
     # --- Pass 1: require_blank_before ---
     # Remove boundaries whose line is not preceded by a blank line.
+    before_pass1 = len(boundaries)
     filtered = []
     for b in boundaries:
         cfg = level_config.get(b.level)
@@ -229,6 +232,7 @@ def filter_boundaries(
                 continue
         filtered.append(b)
     boundaries = filtered
+    logger.info("Pass 1 (blank_before): %d -> %d boundaries", before_pass1, len(boundaries))
 
     # --- Pass 2: min_gap_lines ---
     # For each hierarchy level with min_gap_lines > 0, iterate same-level
@@ -238,6 +242,7 @@ def filter_boundaries(
         h.level for h in profile.hierarchy if h.min_gap_lines > 0
     }
     if levels_with_gap:
+        before_pass2 = len(boundaries)
         # Track last-seen line_number per level
         last_line: dict[int, int] = {}
         filtered = []
@@ -251,6 +256,7 @@ def filter_boundaries(
                 last_line[b.level] = b.line_number
             filtered.append(b)
         boundaries = filtered
+        logger.info("Pass 2 (min_gap): %d -> %d boundaries", before_pass2, len(boundaries))
 
     # --- Pass 3: min_content_words ---
     # For each boundary, count words between it and the next boundary
@@ -259,6 +265,7 @@ def filter_boundaries(
         h.level for h in profile.hierarchy if h.min_content_words > 0
     }
     if levels_with_min_words:
+        before_pass3 = len(boundaries)
         filtered = []
         for i, b in enumerate(boundaries):
             if b.level in levels_with_min_words:
@@ -274,6 +281,7 @@ def filter_boundaries(
                     continue
             filtered.append(b)
         boundaries = filtered
+        logger.info("Pass 3 (min_words): %d -> %d boundaries", before_pass3, len(boundaries))
 
     after = len(boundaries)
     logger.info("Boundary filter: %d → %d boundaries", before, after)

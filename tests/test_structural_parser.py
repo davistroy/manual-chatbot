@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import pytest
@@ -1109,3 +1110,157 @@ class TestManifestPersistence:
 
         assert loaded.manual_id == "empty-test"
         assert loaded.entries == []
+
+
+# ── Per-Pass Filter Logging Tests ────────────────────────────────
+
+
+class TestFilterBoundaryLogging:
+    """Test that filter_boundaries() emits per-pass INFO log messages."""
+
+    @pytest.fixture
+    def _make_profile(self, xj_profile_path):
+        """Return a helper that loads the XJ profile and patches hierarchy filter fields."""
+        def _inner(
+            min_gap_lines: int = 0,
+            min_content_words: int = 0,
+            require_blank_before: bool = False,
+            require_known_id: bool = False,
+            known_ids: list[dict[str, str]] | None = None,
+            target_level: int = 1,
+        ):
+            profile = load_profile(xj_profile_path)
+            for h in profile.hierarchy:
+                if h.level == target_level:
+                    h.min_gap_lines = min_gap_lines
+                    h.min_content_words = min_content_words
+                    h.require_blank_before = require_blank_before
+                    h.require_known_id = require_known_id
+                    if known_ids is not None:
+                        h.known_ids = known_ids
+            return profile
+
+        return _inner
+
+    def test_pass0_known_id_logging(self, _make_profile, caplog):
+        """Pass 0 (known_id) logs before/after count when known_id filtering is active."""
+        profile = _make_profile(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=5),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        pass0_msgs = [r.message for r in caplog.records if "Pass 0 (known_id)" in r.message]
+        assert len(pass0_msgs) == 1
+        assert "2 -> 1 boundaries" in pass0_msgs[0]
+
+    def test_pass1_blank_before_logging(self, _make_profile, caplog):
+        """Pass 1 (blank_before) always logs before/after count."""
+        profile = _make_profile(require_blank_before=True, target_level=3)
+        pages = [
+            "7 Cooling System\n"
+            "content right before heading\n"
+            "HEADING WITHOUT BLANK BEFORE\n"
+            "some content words here to pad things out more and more"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="HEADING WITHOUT BLANK BEFORE", page_number=0, line_number=2),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        pass1_msgs = [r.message for r in caplog.records if "Pass 1 (blank_before)" in r.message]
+        assert len(pass1_msgs) == 1
+        assert "2 -> 1 boundaries" in pass1_msgs[0]
+
+    def test_pass2_min_gap_logging(self, _make_profile, caplog):
+        """Pass 2 (min_gap) logs before/after count when gap filtering is active."""
+        profile = _make_profile(min_gap_lines=10, target_level=3)
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "FIRST HEADING PROCEDURE\n"
+            "SECOND HEADING PROCEDURE\n"
+            "some content words here to pad things out"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="FIRST HEADING PROCEDURE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="SECOND HEADING PROCEDURE", page_number=0, line_number=3),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        pass2_msgs = [r.message for r in caplog.records if "Pass 2 (min_gap)" in r.message]
+        assert len(pass2_msgs) == 1
+        assert "3 -> 2 boundaries" in pass2_msgs[0]
+
+    def test_pass3_min_words_logging(self, _make_profile, caplog):
+        """Pass 3 (min_words) logs before/after count when word filtering is active."""
+        profile = _make_profile(min_content_words=100, target_level=3)
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "SPARSE HEADING HERE\n"
+            "ok"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="SPARSE HEADING HERE", page_number=0, line_number=2),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        pass3_msgs = [r.message for r in caplog.records if "Pass 3 (min_words)" in r.message]
+        assert len(pass3_msgs) == 1
+        assert "2 -> 1 boundaries" in pass3_msgs[0]
+
+    def test_all_passes_log_when_all_filters_active(self, _make_profile, caplog):
+        """When all four filter passes are active, all four produce log messages."""
+        profile = _make_profile(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            min_gap_lines=3,
+            min_content_words=5,
+            require_blank_before=True,
+            target_level=1,
+        )
+        pages = [
+            "\n"
+            "7 Cooling System\n"
+            "some content words here to pad things out with more words\n"
+            "even more content to ensure word threshold is met\n"
+            "and more content"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=1),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        log_messages = [r.message for r in caplog.records]
+        assert any("Pass 0 (known_id)" in m for m in log_messages), "Missing Pass 0 log"
+        assert any("Pass 1 (blank_before)" in m for m in log_messages), "Missing Pass 1 log"
+        assert any("Pass 2 (min_gap)" in m for m in log_messages), "Missing Pass 2 log"
+        assert any("Pass 3 (min_words)" in m for m in log_messages), "Missing Pass 3 log"
+
+    def test_summary_log_always_emitted(self, _make_profile, caplog):
+        """The final summary log is always emitted regardless of which filters are active."""
+        profile = _make_profile()  # all filters disabled
+        pages = ["some content"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+        ]
+        with caplog.at_level(logging.INFO, logger="pipeline.structural_parser"):
+            filter_boundaries(boundaries, profile, pages)
+
+        summary_msgs = [r.message for r in caplog.records if "Boundary filter:" in r.message]
+        assert len(summary_msgs) == 1
