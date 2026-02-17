@@ -116,6 +116,7 @@ class ManualProfile:
     ocr_cleanup: OcrCleanupConfig
     variants: VariantConfig
     skip_sections: list[str] = field(default_factory=list)
+    cross_ref_unresolved_severity: str = "error"
 
 
 def _parse_content_types(data: dict[str, Any]) -> ContentTypeConfig:
@@ -259,6 +260,7 @@ def load_profile(path: str | Path) -> ManualProfile:
         ocr_cleanup=_parse_ocr_cleanup(data.get("ocr_cleanup", {})),
         variants=_parse_variants(data.get("variants", {})),
         skip_sections=data.get("skip_sections", []),
+        cross_ref_unresolved_severity=data.get("cross_ref_unresolved_severity", "error"),
     )
 
 
@@ -353,6 +355,14 @@ def validate_profile(profile: ManualProfile) -> list[str]:
                 errors.append(
                     f"Invalid regex_substitutions[{i}] pattern: {e}"
                 )
+
+    # Validate cross_ref_unresolved_severity
+    valid_severities = {"error", "warning"}
+    if profile.cross_ref_unresolved_severity not in valid_severities:
+        errors.append(
+            f"cross_ref_unresolved_severity '{profile.cross_ref_unresolved_severity}' "
+            f"is not valid. Must be one of: {', '.join(sorted(valid_severities))}."
+        )
 
     # Validate safety callout levels and styles
     valid_callout_levels = {"warning", "caution", "note"}

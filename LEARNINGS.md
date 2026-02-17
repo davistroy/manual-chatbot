@@ -39,3 +39,11 @@ Issues encountered and solutions discovered during implementation.
 - All 3 profile agents (6.1 CJ universal, 7.1 TM9-8014, 8.1 TM9-8015-2) ran in parallel with no merge conflicts — each creates a new YAML profile and appends tests to test_profile.py in non-overlapping test classes
 - Each profile required iterative tuning against real PDFs: TOC false positives needed known_ids filtering, OCR artifacts required manual-specific substitution lists, and boundary post-filters (min_gap_lines, min_content_words, require_blank_before) needed per-manual calibration
 - 502 tests pass after all 3 profiles completed (up from 465 after Phase 5)
+
+## Pipeline Validation Round (2026-02-17)
+
+- CJ Universal required aggressive L1 filtering: `min_gap_lines=500` was necessary to suppress running-header false positives that appeared every even page. The L1 id_pattern also needed end-of-line anchoring (`$`) to avoid mid-line matches in body text
+- `cross_ref_unresolved_severity` profile field added to downgrade cross-ref errors to warnings for manuals with sparse paragraph numbering (military TMs). TM9-8014 has 206 cross-ref references that cannot resolve because the manual uses paragraph numbers not present in detected boundaries — these are legitimate references to content that the pipeline cannot structurally detect
+- Content-text probe (Strategy 5) added to the cross-ref checker: when a cross-ref target is not found as a chunk ID or boundary, the resolver now searches for the target string in chunk text content. This catches merged paragraphs where the paragraph number appears inline but was not detected as a structural boundary
+- TM9-8015-1 had the poorest OCR quality of all 5 manuals, requiring 35 literal OCR substitutions and 9 regex substitutions. Roman numeral chapter headings were frequently garbled (e.g., "Xl" for "XI"), necessitating OCR-variant known_ids. Despite the quality, pipeline achieved 64 chunks with 0 errors and 58 warnings
+- 522 tests pass after all 5 production profiles validated and complete

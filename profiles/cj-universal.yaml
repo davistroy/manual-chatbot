@@ -72,11 +72,16 @@ structure:
     - level: 1
       name: "section"
       # Matches standalone section letter (A-U) optionally followed by digit (D1, F1, F2, J1)
-      # OCR renders compound IDs as both "D1" and "Dl" (lowercase L), and "F l" (space + lowercase L)
-      # The id_pattern captures the letter+optional digit from a line like "D\n" or "D1\n" or "Dl\n"
-      id_pattern: "^([A-Z][1-2l]?)\\s"
-      title_pattern: "^[A-Z][1-2l]?\\s+(.+)"
+      # on its own line. The $ anchor prevents matching lines where a capital letter
+      # starts a sentence (e.g., "A description of...").
+      # OCR renders compound IDs as both "D1" and "Dl" (lowercase L).
+      # min_gap_lines filters out running headers that repeat the section letter
+      # on every even page (~100 lines apart); real sections are 270+ lines apart.
+      id_pattern: "^([A-Z][1-2l]?)$"
+      title_pattern: null
       require_known_id: true
+      min_gap_lines: 500
+      require_blank_before: true
       known_ids:
         - { id: "A", title: "General Data" }
         - { id: "B", title: "Lubrication" }
@@ -110,10 +115,11 @@ structure:
       name: "paragraph"
       # Matches paragraph IDs like "A-1.", "B-7.", "D1-5.", "Dl-38.", "Fl-10.", "0-5." (O->0 OCR)
       # OCR renders I as 1 (section I paragraphs appear as "1-1.") and O as 0 ("0-5.")
-      id_pattern: "^([A-Z0-9][A-Za-z0-9]?-\\d+)\\.\\s"
+      # Pattern allows title on same line (A-1. GENERAL) or next line (B-66.\n Title)
+      id_pattern: "^([A-Z0-9][A-Za-z0-9]?-\\d+)\\."
       title_pattern: "^[A-Z0-9][A-Za-z0-9]?-\\d+\\.\\s+(.+)"
-      min_content_words: 50
-      require_blank_before: true
+      min_content_words: 20
+      require_blank_before: false
     - level: 3
       name: "sub-paragraph"
       id_pattern: null

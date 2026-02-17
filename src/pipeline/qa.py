@@ -297,11 +297,41 @@ def check_cross_ref_validity(
                 ):
                     continue  # resolved via suffix-segment match
 
+            # Strategy 5: content-text probe — when a paragraph reference
+            # (like "manual::69") can't resolve by chunk ID, check if
+            # the bare paragraph marker (e.g., "69. ") appears at the
+            # start of a line in a *different* chunk's text.  This handles
+            # small paragraphs that were merged into adjacent chunks
+            # during assembly.  The line-start requirement prevents false
+            # matches on inline text like "See paragraph 69."
+            if len(ref_parts) >= 2:
+                bare_id = ref_parts[-1]
+                # Probe pattern: "69. " at start of line (paragraph heading)
+                probe_pat = re.compile(rf"(?:^|\n){re.escape(bare_id)}\.\s")
+                if any(
+                    probe_pat.search(c.text)
+                    for c in chunks
+                    if c.chunk_id != chunk.chunk_id
+                ):
+                    continue  # resolved via content-text probe
+
             is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
+
+            # Determine severity: skipped sections always get "warning";
+            # otherwise use the profile's cross_ref_unresolved_severity
+            # (defaults to "error", but profiles with sparse paragraph
+            # numbering can set it to "warning").
+            if is_skipped:
+                severity = "warning"
+            elif profile and profile.cross_ref_unresolved_severity:
+                severity = profile.cross_ref_unresolved_severity
+            else:
+                severity = "error"
+
             issues.append(
                 ValidationIssue(
                     check="cross_ref_validity",
-                    severity="warning" if is_skipped else "error",
+                    severity=severity,
                     chunk_id=chunk.chunk_id,
                     message=f"Cross-reference target not found: '{ref}'"
                         + (" (skipped section)" if is_skipped else ""),

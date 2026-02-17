@@ -354,6 +354,12 @@
       "items": { "type": "string" },
       "default": [],
       "description": "Level-1 section IDs to exclude from chunk assembly (e.g., ['8W'] to skip wiring diagrams)."
+    },
+    "cross_ref_unresolved_severity": {
+      "type": "string",
+      "enum": ["error", "warning"],
+      "default": "error",
+      "description": "Severity level for unresolved cross-references. Set to 'warning' for manuals where paragraph-numbered cross-references are pervasive but most paragraphs are not structural boundaries (e.g., military TMs with image-only chapters)."
     }
   }
 }

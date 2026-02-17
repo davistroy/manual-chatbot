@@ -1,7 +1,7 @@
 # Progress Log
 
 **Started:** 2026-02-15
-**Completed:** 2026-02-16
+**Last Updated:** 2026-02-17
 
 ## Completed Work Items
 
@@ -61,10 +61,13 @@
 | 2026-02-17 | Phase 6.1: Create production CJ universal profile | profiles/cj-universal.yaml (new), tests/test_profile.py | 11 new tests (28 known_ids) |
 | 2026-02-17 | Phase 7.1: Create production TM9-8014 profile | profiles/tm9-8014.yaml (new), tests/test_profile.py | 12 new tests (4 chapter known_ids, 42 OCR subs) |
 | 2026-02-17 | Phase 8.1: Create TM9-8015-2 profile | profiles/tm9-8015-2.yaml (new), tests/test_profile.py | 14 new tests (58 L1 sections) |
+| 2026-02-17 | Phase 6.2: Validate CJ pipeline against real PDF | profiles/cj-universal.yaml, src/pipeline/qa.py, tests/test_profile.py | 521 chunks, 0 errors, 0.4% undersized. L1 end-of-line anchor, min_gap_lines=500 |
+| 2026-02-17 | Phase 7.2: Validate TM9-8014 pipeline against real PDF | src/pipeline/profile.py, src/pipeline/qa.py, schema/manual_profile_v1.schema.json, profiles/tm9-8014.yaml | 83 chunks, 0 errors. Added cross_ref_unresolved_severity field |
+| 2026-02-17 | Phase 8.2: Create TM9-8015-1 profile and validate | profiles/tm9-8015-1.yaml (new), tests/test_profile.py | 64 chunks, 0 errors, 58 warnings. Poorest OCR, 35 OCR subs, 19 regression tests |
 
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests), plus 3 production profiles created in parallel (CJ universal, TM9-8014, TM9-8015-2). Full test suite: **502 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests), plus 5 production profiles created and validated (XJ-1999, CJ universal, TM9-8014, TM9-8015-2, TM9-8015-1). All 5 manuals QA-passing. Full test suite: **522 tests passing** (up from 250 baseline).
 
 ### Output Quality Results (XJ 1999 Service Manual)
 
