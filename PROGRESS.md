@@ -82,3 +82,39 @@ All 6 original phases implemented, plus schema stability and documentation impro
 | QA passed | False | **True** | **True** |
 
 No `NotImplementedError` remains in any source module.
+
+---
+
+## Final Completion Summary (2026-02-17)
+
+### Pipeline Status: Multi-Manual Support Complete
+
+The chunking pipeline now processes 5 vehicle service manuals from 3 distinct document families, all QA-passing:
+
+| Manual | Profile | Pages | Chunks | Errors | Warnings | Key Challenge |
+|--------|---------|-------|--------|--------|----------|---------------|
+| 1999 Jeep XJ Service Manual | xj-1999.yaml | 1,948 | 2,137 | 0 | 9 | 39 Chrysler group IDs, 8W wiring diagram skips |
+| 1953-71 CJ Universal Service Manual | cj-universal.yaml | 376 | 521 | 0 | 2 | Running-header false positives, spaced-character OCR |
+| TM9-8014 M38A1 Operator Manual | tm9-8014.yaml | 391 | 83 | 0 | 208 | Image-only chapters, sparse paragraph numbering |
+| TM9-8015-1 M38A1 Engine/Clutch | tm9-8015-1.yaml | 188 | 64 | 0 | 58 | Worst OCR quality, garbled Roman numerals |
+| TM9-8015-2 M38A1 Power Train/Body | tm9-8015-2.yaml | 338 | 135 | 0 | 2 | 58 L1 sections, dense military structure |
+
+### Development Arc
+
+| Phase | Date | Focus | Tests After |
+|-------|------|-------|-------------|
+| Original build (Phases 1-6) | 2026-02-15 | Core pipeline, TDD | 229 |
+| Schema stability + docs | 2026-02-15 | Typed profiles, validation | 250 |
+| REVIEW.md remediation (15 items) | 2026-02-16 | Contracts, persistence, logging | 349 |
+| Output quality (Phases 1-4) | 2026-02-16 | known_ids, cross-ref, XJ profile | 439 |
+| Multi-manual code fixes (Phase 5) | 2026-02-17 | Partial-path, regex subs, char-spacing | 465 |
+| Production profiles (Phases 6-8) | 2026-02-17 | 4 new profiles, real-PDF validation | 522 |
+| Documentation (Phase 9.3) | 2026-02-17 | CLAUDE.md, PROGRESS.md, LEARNINGS.md | 522 |
+
+### What Remains
+
+- **Phase 9.1**: Profile discovery test (parametrized test that auto-discovers all profiles in `profiles/`)
+- **Phase 9.2**: CLI validation report grouping (`--summary-only` flag)
+- **PRD Phase 5**: LLM-assisted profile bootstrapping (CLI stub exists)
+- **PRD Phase 6**: Chatbot integration layer
+- **PRD 7.2**: Docker Compose deployment

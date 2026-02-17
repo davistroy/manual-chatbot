@@ -2,11 +2,24 @@
 
 Issues encountered and solutions discovered during implementation.
 
-## Summary
+## Top-Level Summary (All Phases)
+
+1. **known_ids filtering is the single most effective quality lever.** Whitelisting valid L1 section IDs eliminates thousands of false-positive boundaries from TOC entries, running headers, and body-text mentions. Every production profile uses `require_known_id: true` on L1.
+2. **OCR quality varies wildly across manuals and demands per-profile tuning.** The same pipeline code handles 1999 Chrysler digital PDFs and 1950s military scans, but each needs its own substitution lists (literal + regex), character-spacing collapse settings, and garbage-detection thresholds.
+3. **Cross-reference resolution needs multiple strategies, not one.** Five strategies were required: exact ID, boundary prefix, sub-ID prefix, suffix-segment partial-path, and content-text probe. No single strategy covers all reference styles across manual families.
+4. **Production profiles must be separate from test fixtures.** Test fixtures are minimal and frozen; production profiles are iteratively tuned against real PDFs. Keeping them separate prevents regressions during profile tuning.
+5. **Boundary post-filters (min_gap_lines, require_blank_before) are essential for noisy OCR.** Raw regex matching produces too many false positives in scanned documents. Post-filters that require minimum spacing between boundaries eliminate running-header and TOC noise.
+6. **cross_ref_unresolved_severity lets manuals with sparse paragraph numbering pass QA.** Military TMs reference paragraph numbers that aren't structural boundaries. Downgrading these to warnings (instead of errors) keeps QA meaningful without penalizing legitimate document structure.
+7. **Chunk assembly rule ordering matters: R1-R3-R4-R5-R2-R6-R7-R8.** Step/safety/table integrity must be established before size splitting, or the splitter breaks semantic units.
+8. **Character-spacing collapse (`collapse_spaced_chars`) rescues otherwise-unreadable OCR.** Old military manuals often have OCR that inserts spaces between every letter. Collapsing sequences of 3+ single characters recovers readable text without damaging legitimate two-letter abbreviations.
+9. **Parallel agent execution works well when file boundaries are clear.** All 4 Phase 5 work items and all 3 Phase 6-7 profile agents ran in parallel with zero merge conflicts because each touched different files or non-overlapping sections.
+10. **Iterative real-PDF validation is non-negotiable.** Every production profile required 2-5 tuning rounds after initial creation. Metrics that look reasonable on test fixtures can be wildly wrong on real 300-1900 page manuals.
+
+## Original Implementation (2026-02-15)
 
 - OCR garbage detection requires per-token non-ASCII density analysis, not per-line, to catch lines with mixed clean/garbage content
 - The `assess_quality` needs_reocr threshold is `< 0.7` dictionary match rate (not `< 0.85` as initially assumed from PRD)
-- Structural boundary detection needs context-based disambiguation when a line matches multiple hierarchy levels - track current depth and pick the shallowest level deeper than current context
+- Structural boundary detection needs context-based disambiguation when a line matches multiple hierarchy levels — track current depth and pick the shallowest level deeper than current context
 - Chunk assembly rule ordering matters: R1 -> R3 -> R4 -> R5 -> R2 -> R6 -> R7 -> R8 (not strictly sequential R1-R8) to ensure step/safety/table integrity is established before size splitting
 - Duplicate content detection uses word-level SequenceMatcher (not character-level) to avoid false positives with short texts
 - Cross-reference validity checking needs to consider prefix sub-IDs (e.g., `xj-1999::8A` is valid if `xj-1999::8A::SP` exists)

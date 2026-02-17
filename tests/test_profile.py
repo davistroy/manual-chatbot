@@ -1016,3 +1016,99 @@ class TestProductionTm980151Profile:
         """TM9-8015-1 (engine/clutch) has no wiring diagrams."""
         profile = load_profile(TM9_8015_1_PRODUCTION_PROFILE_PATH)
         assert profile.content_types.wiring_diagrams.get("present") is False
+
+
+# ── Profile Discovery Tests (9.1) ───────────────────────────────
+
+
+_PROFILES_DIR = Path(__file__).parent.parent / "profiles"
+_DISCOVERED_PROFILES = sorted(_PROFILES_DIR.glob("*.yaml"))
+
+
+class TestProfileDiscoveryInvariants:
+    """Parametrized tests that auto-discover all profiles/*.yaml files and
+    assert common invariants.
+
+    Adding a new YAML file to profiles/ automatically includes it in this
+    test suite — no manual registration required.
+    """
+
+    @pytest.fixture(params=_DISCOVERED_PROFILES, ids=lambda p: p.stem)
+    def production_profile_path(self, request: pytest.FixtureRequest) -> Path:
+        return request.param
+
+    def test_profile_loads_successfully(self, production_profile_path: Path):
+        """Every production profile must load without errors."""
+        profile = load_profile(production_profile_path)
+        assert isinstance(profile, ManualProfile)
+
+    def test_profile_validates_with_zero_errors(self, production_profile_path: Path):
+        """Every production profile must pass validation with no errors."""
+        profile = load_profile(production_profile_path)
+        errors = validate_profile(profile)
+        assert errors == [], (
+            f"Validation errors in {production_profile_path.name}: {errors}"
+        )
+
+    def test_profile_all_patterns_compile(self, production_profile_path: Path):
+        """Every regex pattern in the profile must compile successfully."""
+        profile = load_profile(production_profile_path)
+        patterns = compile_patterns(profile)
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled in "
+                    f"{production_profile_path.name}: {p}"
+                )
+
+    def test_profile_has_at_least_one_hierarchy_level(self, production_profile_path: Path):
+        """Every production profile must define at least one hierarchy level."""
+        profile = load_profile(production_profile_path)
+        assert len(profile.hierarchy) >= 1, (
+            f"{production_profile_path.name} has no hierarchy levels"
+        )
+
+    def test_profile_has_manual_id(self, production_profile_path: Path):
+        """Every production profile must have a non-empty manual_id."""
+        profile = load_profile(production_profile_path)
+        assert profile.manual_id, (
+            f"{production_profile_path.name} has empty manual_id"
+        )
+
+    def test_profile_has_vehicle_info(self, production_profile_path: Path):
+        """Every production profile must define at least one vehicle."""
+        profile = load_profile(production_profile_path)
+        assert len(profile.vehicles) >= 1, (
+            f"{production_profile_path.name} has no vehicles"
+        )
+        # Each vehicle must have a model and years
+        for v in profile.vehicles:
+            assert v.model, f"Vehicle in {production_profile_path.name} has empty model"
+            assert v.years, f"Vehicle in {production_profile_path.name} has empty years"
+
+    def test_profile_l1_has_require_known_id(self, production_profile_path: Path):
+        """L1 must have require_known_id: true to prevent false-positive boundaries."""
+        profile = load_profile(production_profile_path)
+        assert profile.hierarchy[0].require_known_id is True, (
+            f"{production_profile_path.name} L1 does not have require_known_id=true"
+        )
+
+    def test_profile_l1_has_nonempty_known_ids(self, production_profile_path: Path):
+        """L1 must have at least one known_id entry."""
+        profile = load_profile(production_profile_path)
+        assert len(profile.hierarchy[0].known_ids) > 0, (
+            f"{production_profile_path.name} L1 has no known_ids"
+        )
+
+    def test_profile_no_duplicate_known_ids_within_level(self, production_profile_path: Path):
+        """No hierarchy level should have duplicate known_ids."""
+        profile = load_profile(production_profile_path)
+        for level in profile.hierarchy:
+            if not level.known_ids:
+                continue
+            ids = [k["id"] for k in level.known_ids]
+            duplicates = [id_ for id_ in ids if ids.count(id_) > 1]
+            assert not duplicates, (
+                f"{production_profile_path.name} level {level.level} ({level.name}) "
+                f"has duplicate known_ids: {set(duplicates)}"
+            )

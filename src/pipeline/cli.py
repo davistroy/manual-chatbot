@@ -6,7 +6,10 @@ import argparse
 import logging
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
+
+from .qa import ValidationReport
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--diagnostics", action="store_true", default=False,
         help="Show boundary quality diagnostics (total, per-page, content size, false positives, level distribution)",
     )
+    validate_parser.add_argument(
+        "--summary-only", action="store_true", default=False,
+        help="Show only the validation summary, suppress per-issue detail",
+    )
 
     # qa subcommand
     qa_parser = subparsers.add_parser(
@@ -101,8 +108,69 @@ def build_parser() -> argparse.ArgumentParser:
     validate_chunks_parser.add_argument(
         "--profile", required=True, help="Path to the YAML profile file"
     )
+    validate_chunks_parser.add_argument(
+        "--summary-only", action="store_true", default=False,
+        help="Show only the validation summary, suppress per-issue detail",
+    )
 
     return parser
+
+
+def format_validation_summary(report: ValidationReport) -> str:
+    """Build a grouped summary string from a ValidationReport.
+
+    Groups issues by check name, counts errors and warnings per check,
+    and produces a human-readable summary block.
+
+    Returns:
+        Multi-line summary string.
+    """
+    # Count (check, severity) pairs
+    counter: Counter[tuple[str, str]] = Counter()
+    for issue in report.issues:
+        counter[(issue.check, issue.severity)] += 1
+
+    lines: list[str] = []
+    lines.append("=== Validation Summary ===")
+
+    # One line per check that was run, sorted alphabetically
+    for check in sorted(report.checks_run):
+        errors = counter.get((check, "error"), 0)
+        warnings = counter.get((check, "warning"), 0)
+        lines.append(f"{check}: {errors} errors, {warnings} warnings")
+
+    lines.append(f"Total: {report.error_count} errors, {report.warning_count} warnings")
+    lines.append(f"Result: {'PASSED' if report.passed else 'FAILED'}")
+
+    return "\n".join(lines)
+
+
+def _log_validation_report(
+    report: ValidationReport, *, summary_only: bool = False
+) -> None:
+    """Log a validation report: per-issue detail (unless suppressed) then summary.
+
+    Args:
+        report: The ValidationReport to log.
+        summary_only: If True, skip per-issue detail and only print the summary.
+    """
+    logger.info(
+        "Validation: %d checks run on %d chunks",
+        len(report.checks_run), report.total_chunks,
+    )
+
+    if not summary_only and report.issues:
+        logger.info("Issues:")
+        for issue in report.issues:
+            logger.info(
+                "  [%s] %s: %s (chunk: %s)",
+                issue.severity, issue.check, issue.message, issue.chunk_id,
+            )
+
+    # Always print summary
+    summary = format_validation_summary(report)
+    for line in summary.split("\n"):
+        logger.info(line)
 
 
 def cmd_process(args: argparse.Namespace) -> int:
@@ -334,15 +402,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     # 7. Run QA validation suite
     report = run_validation_suite(chunks, profile)
-    logger.info("Validation: %d checks run on %d chunks", len(report.checks_run), report.total_chunks)
-    logger.info("  Errors:   %d", report.error_count)
-    logger.info("  Warnings: %d", report.warning_count)
-    logger.info("  Passed:   %s", report.passed)
-
-    if report.issues:
-        logger.info("Issues:")
-        for issue in report.issues:
-            logger.info("  [%s] %s: %s (chunk: %s)", issue.severity, issue.check, issue.message, issue.chunk_id)
+    summary_only = getattr(args, "summary_only", False)
+    _log_validation_report(report, summary_only=summary_only)
 
     return 0 if report.passed else 1
 
@@ -383,15 +444,8 @@ def cmd_validate_chunks(args: argparse.Namespace) -> int:
 
     # 3. Run QA validation suite
     report = run_validation_suite(chunks, profile)
-    logger.info("Validation: %d checks run on %d chunks", len(report.checks_run), report.total_chunks)
-    logger.info("  Errors:   %d", report.error_count)
-    logger.info("  Warnings: %d", report.warning_count)
-    logger.info("  Passed:   %s", report.passed)
-
-    if report.issues:
-        logger.info("Issues:")
-        for issue in report.issues:
-            logger.info("  [%s] %s: %s (chunk: %s)", issue.severity, issue.check, issue.message, issue.chunk_id)
+    summary_only = getattr(args, "summary_only", False)
+    _log_validation_report(report, summary_only=summary_only)
 
     return 0 if report.passed else 1
 

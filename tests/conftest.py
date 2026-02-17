@@ -9,6 +9,15 @@ import pytest
 from pipeline.structural_parser import LineRange, PageRange
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+PROFILES_DIR = Path(__file__).parent.parent / "profiles"
+
+
+def discover_production_profiles() -> list[Path]:
+    """Auto-discover all YAML files in the profiles/ directory."""
+    profiles = sorted(PROFILES_DIR.glob("*.yaml"))
+    if not profiles:
+        pytest.fail(f"No production profiles found in {PROFILES_DIR}")
+    return profiles
 
 
 # ── Profile Fixtures ──────────────────────────────────────────────

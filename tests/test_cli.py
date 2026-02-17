@@ -7,7 +7,8 @@ import json
 
 import pytest
 
-from pipeline.cli import build_parser, main, _print_boundary_diagnostics
+from pipeline.cli import build_parser, main, _print_boundary_diagnostics, format_validation_summary, _log_validation_report
+from pipeline.qa import ValidationReport, ValidationIssue
 from pipeline.structural_parser import Boundary
 
 
@@ -394,3 +395,238 @@ class TestMain:
             ])
         assert "Validation:" in caplog.text
         assert "checks run" in caplog.text
+
+
+# ── Parser: --summary-only Flag Tests ────────────────────────────
+
+
+class TestSummaryOnlyFlag:
+    """Test --summary-only flag parsing on validate and validate-chunks."""
+
+    def test_validate_accepts_summary_only_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate", "--profile", "p.yaml", "--pdf", "m.pdf", "--summary-only"]
+        )
+        assert args.summary_only is True
+
+    def test_validate_summary_only_defaults_to_false(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate", "--profile", "p.yaml", "--pdf", "m.pdf"]
+        )
+        assert args.summary_only is False
+
+    def test_validate_chunks_accepts_summary_only_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate-chunks", "--chunks", "c.jsonl", "--profile", "p.yaml", "--summary-only"]
+        )
+        assert args.summary_only is True
+
+    def test_validate_chunks_summary_only_defaults_to_false(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate-chunks", "--chunks", "c.jsonl", "--profile", "p.yaml"]
+        )
+        assert args.summary_only is False
+
+
+# ── Validation Summary Formatting Tests ──────────────────────────
+
+
+class TestFormatValidationSummary:
+    """Test format_validation_summary output grouping."""
+
+    def _make_report(self, issues, checks_run=None, passed=True):
+        """Helper to build a ValidationReport with given issues."""
+        if checks_run is None:
+            checks_run = sorted({i.check for i in issues}) if issues else []
+        return ValidationReport(
+            total_chunks=10,
+            issues=issues,
+            checks_run=checks_run,
+            passed=passed,
+        )
+
+    def test_summary_header_present(self):
+        report = self._make_report([])
+        summary = format_validation_summary(report)
+        assert "=== Validation Summary ===" in summary
+
+    def test_summary_shows_total_counts(self):
+        issues = [
+            ValidationIssue(check="size_outliers", severity="warning", chunk_id="c1", message="too small"),
+            ValidationIssue(check="size_outliers", severity="warning", chunk_id="c2", message="too small"),
+            ValidationIssue(check="metadata_completeness", severity="error", chunk_id="c3", message="missing field"),
+        ]
+        report = self._make_report(issues, checks_run=["size_outliers", "metadata_completeness"], passed=False)
+        summary = format_validation_summary(report)
+        assert "Total: 1 errors, 2 warnings" in summary
+
+    def test_summary_groups_by_check_and_severity(self):
+        issues = [
+            ValidationIssue(check="cross_ref_validity", severity="error", chunk_id="c1", message="not found"),
+            ValidationIssue(check="cross_ref_validity", severity="warning", chunk_id="c2", message="skipped"),
+            ValidationIssue(check="cross_ref_validity", severity="warning", chunk_id="c3", message="skipped"),
+            ValidationIssue(check="size_outliers", severity="warning", chunk_id="c4", message="too big"),
+            ValidationIssue(check="orphaned_steps", severity="warning", chunk_id="c5", message="mid-seq"),
+        ]
+        report = self._make_report(
+            issues,
+            checks_run=["cross_ref_validity", "orphaned_steps", "size_outliers"],
+            passed=False,
+        )
+        summary = format_validation_summary(report)
+        assert "cross_ref_validity: 1 errors, 2 warnings" in summary
+        assert "size_outliers: 0 errors, 1 warnings" in summary
+        assert "orphaned_steps: 0 errors, 1 warnings" in summary
+
+    def test_summary_includes_checks_with_zero_issues(self):
+        """Checks that were run but had no issues still appear in summary."""
+        report = self._make_report(
+            issues=[],
+            checks_run=["orphaned_steps", "size_outliers", "metadata_completeness"],
+            passed=True,
+        )
+        summary = format_validation_summary(report)
+        assert "metadata_completeness: 0 errors, 0 warnings" in summary
+        assert "orphaned_steps: 0 errors, 0 warnings" in summary
+        assert "size_outliers: 0 errors, 0 warnings" in summary
+
+    def test_summary_result_passed(self):
+        report = self._make_report([], passed=True)
+        summary = format_validation_summary(report)
+        assert "Result: PASSED" in summary
+
+    def test_summary_result_failed(self):
+        issues = [
+            ValidationIssue(check="metadata_completeness", severity="error", chunk_id="c1", message="missing"),
+        ]
+        report = self._make_report(issues, passed=False)
+        summary = format_validation_summary(report)
+        assert "Result: FAILED" in summary
+
+    def test_checks_sorted_alphabetically(self):
+        report = self._make_report(
+            issues=[],
+            checks_run=["size_outliers", "cross_ref_validity", "orphaned_steps"],
+            passed=True,
+        )
+        summary = format_validation_summary(report)
+        lines = summary.split("\n")
+        # Extract check lines: between header and "Total:" line
+        check_lines = [
+            l for l in lines
+            if ": 0 errors" in l and not l.startswith("Total:")
+        ]
+        check_names = [l.split(":")[0] for l in check_lines]
+        assert check_names == sorted(check_names)
+
+
+# ── _log_validation_report Tests ─────────────────────────────────
+
+
+class TestLogValidationReport:
+    """Test _log_validation_report with and without summary_only."""
+
+    def _make_report_with_issues(self):
+        issues = [
+            ValidationIssue(check="size_outliers", severity="warning", chunk_id="c1", message="Chunk too small: 50 tokens"),
+            ValidationIssue(check="metadata_completeness", severity="error", chunk_id="c2", message="Missing field: level1_id"),
+        ]
+        return ValidationReport(
+            total_chunks=5,
+            issues=issues,
+            checks_run=["size_outliers", "metadata_completeness"],
+            passed=False,
+        )
+
+    def test_default_mode_logs_issues_and_summary(self, caplog):
+        import logging
+
+        report = self._make_report_with_issues()
+        with caplog.at_level(logging.INFO):
+            _log_validation_report(report)
+        # Per-issue detail present
+        assert "Chunk too small: 50 tokens" in caplog.text
+        assert "Missing field: level1_id" in caplog.text
+        # Summary present
+        assert "=== Validation Summary ===" in caplog.text
+        assert "Total: 1 errors, 1 warnings" in caplog.text
+
+    def test_summary_only_suppresses_individual_issues(self, caplog):
+        import logging
+
+        report = self._make_report_with_issues()
+        with caplog.at_level(logging.INFO):
+            _log_validation_report(report, summary_only=True)
+        # Per-issue detail NOT present
+        assert "Chunk too small: 50 tokens" not in caplog.text
+        assert "Missing field: level1_id" not in caplog.text
+        # Summary IS present
+        assert "=== Validation Summary ===" in caplog.text
+        assert "Total: 1 errors, 1 warnings" in caplog.text
+        assert "Result: FAILED" in caplog.text
+
+
+# ── Integration: --summary-only with validate-chunks ─────────────
+
+
+class TestValidateChunksSummaryOnly:
+    """Integration test: validate-chunks with --summary-only flag."""
+
+    def test_summary_only_suppresses_detail_in_validate_chunks(self, tmp_path, xj_profile_path, caplog):
+        import json
+        import logging
+
+        # Build a chunk that will trigger a metadata_completeness error
+        chunks_file = tmp_path / "chunks.jsonl"
+        chunk = {
+            "chunk_id": "xj-1999::0::SP",
+            "manual_id": "xj-1999",
+            "text": " ".join(["word"] * 250),
+            "metadata": {},  # missing required fields -> errors
+        }
+        chunks_file.write_text(json.dumps(chunk) + "\n", encoding="utf-8")
+
+        with caplog.at_level(logging.INFO):
+            result = main([
+                "validate-chunks",
+                "--chunks", str(chunks_file),
+                "--profile", str(xj_profile_path),
+                "--summary-only",
+            ])
+
+        # Should fail because of missing metadata
+        assert result == 1
+        # Summary must be present
+        assert "=== Validation Summary ===" in caplog.text
+        assert "Result: FAILED" in caplog.text
+        # Per-issue lines (with [error] prefix) should NOT be present
+        assert "[error] metadata_completeness" not in caplog.text
+
+    def test_without_summary_only_shows_detail(self, tmp_path, xj_profile_path, caplog):
+        import json
+        import logging
+
+        chunks_file = tmp_path / "chunks.jsonl"
+        chunk = {
+            "chunk_id": "xj-1999::0::SP",
+            "manual_id": "xj-1999",
+            "text": " ".join(["word"] * 250),
+            "metadata": {},
+        }
+        chunks_file.write_text(json.dumps(chunk) + "\n", encoding="utf-8")
+
+        with caplog.at_level(logging.INFO):
+            result = main([
+                "validate-chunks",
+                "--chunks", str(chunks_file),
+                "--profile", str(xj_profile_path),
+            ])
+
+        assert result == 1
+        # Both detail and summary should be present
+        assert "[error] metadata_completeness" in caplog.text
+        assert "=== Validation Summary ===" in caplog.text
