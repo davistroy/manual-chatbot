@@ -274,8 +274,12 @@ def check_cross_ref_validity(
             continue
 
         for ref in cross_refs:
-            # Check if the reference resolves to any known chunk ID or prefix
-            if ref not in all_chunk_ids and ref not in all_prefixes:
+            # Check if the reference resolves to any known chunk ID or prefix.
+            # Also check string-prefix matching for group families (e.g.,
+            # "xj-1999::8" should match "xj-1999::8A", "xj-1999::8B", etc.)
+            if ref not in all_chunk_ids and ref not in all_prefixes and not any(
+                p.startswith(ref) for p in all_prefixes
+            ):
                 is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
                 issues.append(
                     ValidationIssue(
