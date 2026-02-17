@@ -20,6 +20,10 @@ class HierarchyLevel:
     id_pattern: str | None
     title_pattern: str | None
     known_ids: list[dict[str, str]] = field(default_factory=list)
+    min_gap_lines: int = 0          # 0 = disabled
+    min_content_words: int = 0      # 0 = disabled
+    require_blank_before: bool = False
+    require_known_id: bool = False
 
 
 @dataclass
@@ -109,6 +113,7 @@ class ManualProfile:
     content_types: ContentTypeConfig
     ocr_cleanup: OcrCleanupConfig
     variants: VariantConfig
+    skip_sections: list[str] = field(default_factory=list)
 
 
 def _parse_content_types(data: dict[str, Any]) -> ContentTypeConfig:
@@ -200,6 +205,10 @@ def load_profile(path: str | Path) -> ManualProfile:
                 id_pattern=h.get("id_pattern"),
                 title_pattern=h.get("title_pattern"),
                 known_ids=h.get("known_ids", []),
+                min_gap_lines=h.get("min_gap_lines", 0),
+                min_content_words=h.get("min_content_words", 0),
+                require_blank_before=h.get("require_blank_before", False),
+                require_known_id=h.get("require_known_id", False),
             )
         )
 
@@ -245,6 +254,7 @@ def load_profile(path: str | Path) -> ManualProfile:
         content_types=_parse_content_types(data.get("content_types", {})),
         ocr_cleanup=_parse_ocr_cleanup(data.get("ocr_cleanup", {})),
         variants=_parse_variants(data.get("variants", {})),
+        skip_sections=data.get("skip_sections", []),
     )
 
 

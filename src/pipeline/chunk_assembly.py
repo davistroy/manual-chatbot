@@ -635,6 +635,124 @@ def apply_rule_r8_figure_continuity(
     return result
 
 
+def _extract_level1_id(chunk: Chunk) -> str:
+    """Extract the level-1 group ID from a chunk's chunk_id.
+
+    Chunk IDs follow the pattern ``{manual_id}::{level1_id}::...``.
+    Returns the second ``::``-delimited segment, or an empty string if
+    the chunk_id has fewer than two segments.
+    """
+    parts = chunk.chunk_id.split("::")
+    if len(parts) >= 2:
+        return parts[1]
+    return ""
+
+
+def merge_small_across_entries(
+    chunks: list[Chunk], min_tokens: int = 200, max_tokens: int = 2000
+) -> list[Chunk]:
+    """Post-assembly merge pass: absorb tiny chunks into their next sibling.
+
+    Iterates the full chunk list left to right.  For each chunk whose token
+    count is below *min_tokens*, the chunk's text is prepended to the next
+    chunk **if** both chunks share the same level-1 group (extracted from
+    ``chunk_id``) **and** the combined size does not exceed *max_tokens*.
+
+    Runs multiple passes (up to 10) until no further merges occur so that
+    chains of tiny chunks collapse fully.
+
+    Returns a new list — the input list is not mutated.
+    """
+    # Threshold tuning: min_tokens=200 catches most tiny chunks,
+    # max_tokens=2000 prevents oversized merged chunks.
+    # Tuned against XJ 1999 service manual output.
+    if not chunks:
+        return []
+
+    working = list(chunks)
+    max_passes = 10
+
+    for pass_num in range(max_passes):
+        before = len(working)
+        merged: list[Chunk] = []
+        i = 0
+        while i < len(working):
+            current = working[i]
+
+            if count_tokens(current.text) < min_tokens and i + 1 < len(working):
+                next_chunk = working[i + 1]
+                current_l1 = _extract_level1_id(current)
+                next_l1 = _extract_level1_id(next_chunk)
+
+                if current_l1 == next_l1:
+                    combined_text = current.text + "\n\n" + next_chunk.text
+                    # Guard: don't merge if the result would exceed max_tokens
+                    if count_tokens(combined_text) <= max_tokens:
+                        # Prepend current text to next chunk; next chunk keeps its metadata
+                        working[i + 1] = Chunk(
+                            chunk_id=next_chunk.chunk_id,
+                            manual_id=next_chunk.manual_id,
+                            text=combined_text,
+                            metadata=next_chunk.metadata,
+                        )
+                        i += 1
+                        continue
+
+            merged.append(current)
+            i += 1
+
+        working = merged
+        after = len(working)
+        if after == before:
+            break  # Stable — no merges occurred this pass
+
+    logger.debug("Cross-entry merge: %d → %d chunks", len(chunks), len(working))
+    return working
+
+
+def enrich_chunk_metadata(
+    text: str, metadata: dict[str, Any], profile: ManualProfile
+) -> None:
+    """Scan chunk text for safety callouts, figure references, and cross-references.
+
+    Updates *metadata* in place with three keys:
+
+    - ``has_safety_callouts``  -- sorted, deduplicated list of callout levels
+      found in *text* (e.g. ``["caution", "warning"]``).
+    - ``figure_references``    -- sorted, deduplicated list of figure reference
+      strings found via ``profile.figure_reference_pattern``.
+    - ``cross_references``     -- sorted, deduplicated list of cross-reference
+      strings found via ``profile.cross_reference_patterns``.
+
+    All three keys are always present after this call (empty lists if nothing
+    matched).  The function is designed to run *after* chunk rules R1-R8 so
+    the metadata reflects the actual chunk content rather than the original
+    manifest entry boundaries.
+    """
+    # -- Safety callouts ------------------------------------------------
+    callouts = detect_safety_callouts(text, profile)
+    levels = sorted({c["level"] for c in callouts})
+    metadata["has_safety_callouts"] = levels
+
+    # -- Figure references ----------------------------------------------
+    if profile.figure_reference_pattern:
+        fig_matches = re.findall(profile.figure_reference_pattern, text)
+        metadata["figure_references"] = sorted(set(fig_matches))
+    else:
+        metadata["figure_references"] = []
+
+    # -- Cross-references -----------------------------------------------
+    xref_matches: list[str] = []
+    for pat in profile.cross_reference_patterns:
+        xref_matches.extend(re.findall(pat, text))
+    # Qualify cross-references with manual_id namespace prefix so they
+    # resolve against chunk IDs (which are "{manual_id}::{group}::...").
+    manual_id = metadata.get("manual_id", "")
+    if manual_id:
+        xref_matches = [f"{manual_id}::{ref}" for ref in xref_matches]
+    metadata["cross_references"] = sorted(set(xref_matches))
+
+
 def tag_vehicle_applicability(
     text: str, profile: ManualProfile
 ) -> dict[str, list[str]]:
@@ -705,7 +823,15 @@ def assemble_chunks(
 
     result_chunks: list[Chunk] = []
 
+    # Build skip prefixes from profile.skip_sections
+    manual_id = manifest.manual_id
+    skip_prefixes = [f"{manual_id}::{s}" for s in profile.skip_sections]
+
     for entry_idx, entry in enumerate(manifest.entries):
+        # Skip entries whose chunk_id matches a skipped section prefix
+        if skip_prefixes and any(entry.chunk_id.startswith(p) for p in skip_prefixes):
+            logger.debug("Skipping entry %s (matches skip_sections)", entry.chunk_id)
+            continue
         # Extract text for this manifest entry based on line range
         start_line = entry.line_range.start
         # Determine end line: either the entry's end, or the start of the next entry
@@ -814,6 +940,12 @@ def assemble_chunks(
                 "cross_references": entry.cross_references,
             }
 
+            # Enrich metadata by scanning the actual chunk text for
+            # safety callouts, figure refs, and cross-refs.  This
+            # overwrites the manifest-entry-level values with per-chunk
+            # values that reflect what is really in this text fragment.
+            enrich_chunk_metadata(chunk_text, metadata, profile)
+
             result_chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
@@ -822,6 +954,11 @@ def assemble_chunks(
                     metadata=metadata,
                 )
             )
+
+    # Post-assembly cross-entry merge: merge tiny chunks into next sibling
+    # within the same level-1 group to eliminate orphan fragments that the
+    # per-entry R6 pass cannot reach (it only sees chunks within one entry).
+    result_chunks = merge_small_across_entries(result_chunks)
 
     logger.debug("Assembled %d chunks from %d manifest entries", len(result_chunks), len(manifest.entries))
     return result_chunks

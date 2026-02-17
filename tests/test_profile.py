@@ -155,6 +155,62 @@ class TestLoadProfileHierarchy:
                 assert isinstance(level.id_pattern, str)
 
 
+class TestLoadProfileBoundaryFilters:
+    """Test boundary filter configuration loading from profiles."""
+
+    def test_xj_level3_has_min_gap_lines(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]  # level 3 = procedure
+        assert level3.min_gap_lines == 2
+
+    def test_xj_level3_has_min_content_words(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]
+        assert level3.min_content_words == 5
+
+    def test_xj_level3_has_require_blank_before(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]
+        assert level3.require_blank_before is True
+
+    def test_level_without_filters_defaults_min_gap_lines(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]  # level 1 = group, no filter fields in YAML
+        assert level1.min_gap_lines == 0
+
+    def test_level_without_filters_defaults_min_content_words(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]
+        assert level1.min_content_words == 0
+
+    def test_level_without_filters_defaults_require_blank_before(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]
+        assert level1.require_blank_before is False
+
+    def test_cj_levels_all_default_filters(self, cj_profile_path: Path):
+        """CJ profile has no filter fields — all levels should use defaults."""
+        profile = load_profile(cj_profile_path)
+        for level in profile.hierarchy:
+            assert level.min_gap_lines == 0
+            assert level.min_content_words == 0
+            assert level.require_blank_before is False
+
+    def test_tm9_levels_all_default_filters(self, tm9_profile_path: Path):
+        """TM9 profile has no filter fields — all levels should use defaults."""
+        profile = load_profile(tm9_profile_path)
+        for level in profile.hierarchy:
+            assert level.min_gap_lines == 0
+            assert level.min_content_words == 0
+            assert level.require_blank_before is False
+
+    def test_profile_with_filters_still_validates(self, xj_profile_path: Path):
+        """Profile with boundary filter fields should pass validation."""
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert errors == []
+
+
 class TestLoadProfileSafetyCallouts:
     """Test safety callout loading from profiles."""
 
@@ -349,6 +405,27 @@ class TestExpandedValidation:
         assert not any("callout style" in e for e in errors)
 
 
+# ── Skip Sections Tests ───────────────────────────────────────────
+
+
+class TestLoadProfileSkipSections:
+    """Test skip_sections loading from YAML profiles."""
+
+    def test_xj_skip_sections_loaded(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert profile.skip_sections == ["8W"]
+
+    def test_skip_sections_defaults_to_empty_list(self, cj_profile_path: Path):
+        profile = load_profile(cj_profile_path)
+        assert profile.skip_sections == []
+
+    def test_skip_sections_is_list_of_strings(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        assert isinstance(profile.skip_sections, list)
+        for item in profile.skip_sections:
+            assert isinstance(item, str)
+
+
 # ── Pattern Compilation Tests ─────────────────────────────────────
 
 
@@ -404,3 +481,53 @@ class TestCompilePatterns:
         patterns = compile_patterns(profile)
         hierarchy_patterns = patterns["hierarchy"]
         assert any(p.match("CHAPTER 3") for p in hierarchy_patterns)
+
+
+# ── Production Profile Regression Tests ──────────────────────────
+
+
+PRODUCTION_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "xj-1999.yaml"
+
+
+class TestProductionXjProfile:
+    """Integration tests for the production XJ profile (profiles/xj-1999.yaml).
+
+    These tests ensure the production profile remains loadable, valid, and
+    structurally correct across code changes.
+    """
+
+    def test_production_profile_loads(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        assert isinstance(profile, ManualProfile)
+        assert profile.manual_id == "xj-1999"
+
+    def test_production_profile_validates_no_errors(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        errors = validate_profile(profile)
+        assert errors == [], f"Validation errors: {errors}"
+
+    def test_production_profile_all_patterns_compile(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        patterns = compile_patterns(profile)
+        # Every category should contain compiled re.Pattern objects
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled: {p}"
+                )
+
+    def test_production_profile_known_ids_count(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        known_ids = profile.hierarchy[0].known_ids
+        assert len(known_ids) >= 35, (
+            f"Expected >= 35 known_ids, got {len(known_ids)}"
+        )
+
+    def test_production_profile_l1_require_known_id(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].require_known_id is True
+
+    def test_production_profile_l3_title_pattern_contains_removal(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        l3 = profile.hierarchy[2]
+        assert "REMOVAL" in l3.title_pattern

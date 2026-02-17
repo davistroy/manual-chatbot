@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import statistics
 import sys
 from pathlib import Path
 
@@ -72,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--pdf", required=True, help="Path to the PDF manual file"
     )
+    validate_parser.add_argument(
+        "--diagnostics", action="store_true", default=False,
+        help="Show boundary quality diagnostics (total, per-page, content size, false positives, level distribution)",
+    )
 
     # qa subcommand
     qa_parser = subparsers.add_parser(
@@ -120,7 +125,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     from .profile import load_profile, validate_profile
     from . import extract_pages
     from .ocr_cleanup import clean_page
-    from .structural_parser import detect_boundaries, build_manifest
+    from .structural_parser import detect_boundaries, filter_boundaries, build_manifest
     from .chunk_assembly import assemble_chunks, save_chunks
 
     # 1. Load and validate profile
@@ -141,8 +146,9 @@ def cmd_process(args: argparse.Namespace) -> int:
     cleaned_texts = [c.cleaned_text for c in cleaned]
     logger.info("Cleaned %d pages", len(cleaned))
 
-    # 4. Detect boundaries and build manifest
+    # 4. Detect boundaries, filter, and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
+    boundaries = filter_boundaries(boundaries, profile, cleaned_texts)
     manifest = build_manifest(boundaries, profile)
     logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
@@ -179,6 +185,90 @@ def cmd_bootstrap_profile(args: argparse.Namespace) -> int:
     return 1
 
 
+def _print_boundary_diagnostics(
+    boundaries: list, pages: list[str]
+) -> list[tuple]:
+    """Compute and print boundary quality diagnostics.
+
+    Analyses detected boundaries against the concatenated page text to report:
+    - Total boundary count
+    - Average boundaries per page
+    - Word-count distribution of content between consecutive boundaries
+    - Suspected false positives (boundaries with <= 3 words before the next)
+    - Level distribution
+
+    Args:
+        boundaries: Ordered list of Boundary dataclass instances.
+        pages: List of cleaned text strings, one per page.
+
+    Returns:
+        List of (boundary, word_count) tuples for suspected false positives,
+        useful for optional TSV export.
+    """
+    total = len(boundaries)
+    num_pages = len(pages) if pages else 1
+    avg_per_page = total / num_pages if num_pages else 0.0
+
+    logger.info("Boundary diagnostics:")
+    logger.info("  Total boundaries: %d", total)
+    logger.info("  Boundaries per page: %.1f avg", avg_per_page)
+
+    # Compute content word counts between consecutive boundaries.
+    # Boundaries use global line numbers into the concatenated page stream.
+    all_lines = "\n".join(pages).split("\n")
+    total_lines = len(all_lines)
+
+    content_word_counts: list[int] = []
+    suspected_false_positives: list[tuple] = []
+
+    for i, boundary in enumerate(boundaries):
+        start_line = boundary.line_number
+        if i + 1 < total:
+            end_line = boundaries[i + 1].line_number
+        else:
+            end_line = total_lines
+
+        # Count words in the content span between this boundary and the next
+        span_lines = all_lines[start_line:end_line]
+        word_count = sum(len(line.split()) for line in span_lines)
+        content_word_counts.append(word_count)
+
+        if word_count <= 3:
+            suspected_false_positives.append((boundary, word_count))
+
+    if content_word_counts:
+        min_wc = min(content_word_counts)
+        max_wc = max(content_word_counts)
+        avg_wc = sum(content_word_counts) / len(content_word_counts)
+        median_wc = statistics.median(content_word_counts)
+        logger.info(
+            "  Content between boundaries: min=%d, median=%d, avg=%d, max=%d words",
+            min_wc, int(median_wc), int(avg_wc), max_wc,
+        )
+    else:
+        logger.info("  Content between boundaries: (no boundaries detected)")
+
+    fp_count = len(suspected_false_positives)
+    fp_pct = (fp_count / total * 100) if total else 0.0
+    logger.info(
+        "  Suspected false positives (<=3 words between): %d (%.1f%%)",
+        fp_count, fp_pct,
+    )
+
+    # Level distribution
+    level_counts: dict[str, int] = {}
+    for boundary in boundaries:
+        key = f"level{boundary.level}"
+        level_counts[key] = level_counts.get(key, 0) + 1
+
+    level_parts = ", ".join(
+        f"{k}={v}" for k, v in sorted(level_counts.items())
+    )
+    logger.info("  Level distribution: %s", level_parts if level_parts else "(none)")
+
+    return suspected_false_positives
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Validate a profile against its PDF.
 
@@ -199,7 +289,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from .profile import load_profile, validate_profile
     from . import extract_pages
     from .ocr_cleanup import clean_page
-    from .structural_parser import detect_boundaries, build_manifest, validate_boundaries
+    from .structural_parser import detect_boundaries, filter_boundaries, build_manifest, validate_boundaries
     from .chunk_assembly import assemble_chunks
     from .qa import run_validation_suite
 
@@ -221,8 +311,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     cleaned_texts = [c.cleaned_text for c in cleaned]
     logger.info("Cleaned %d pages", len(cleaned))
 
-    # 4. Detect boundaries and build manifest
+    # 4. Detect boundaries, filter, and build manifest
     boundaries = detect_boundaries(cleaned_texts, profile)
+    boundaries = filter_boundaries(boundaries, profile, cleaned_texts)
     manifest = build_manifest(boundaries, profile)
     logger.info("Detected %d boundaries, %d manifest entries", len(boundaries), len(manifest.entries))
 
@@ -232,6 +323,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         logger.warning("Boundary warnings (%d):", len(boundary_warnings))
         for w in boundary_warnings:
             logger.warning("  %s", w)
+
+    # 5b. Boundary diagnostics (only when --diagnostics flag is present)
+    if getattr(args, "diagnostics", False):
+        _print_boundary_diagnostics(boundaries, cleaned_texts)
 
     # 6. Assemble chunks
     chunks = assemble_chunks(cleaned_texts, manifest, profile)

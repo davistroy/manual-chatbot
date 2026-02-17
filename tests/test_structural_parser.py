@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ from pipeline.structural_parser import (
     PageRange,
     build_manifest,
     detect_boundaries,
+    filter_boundaries,
     generate_chunk_id,
     load_manifest,
     save_manifest,
@@ -189,6 +191,74 @@ class TestDetectBoundaries:
         assert boundaries == []
 
 
+# ── XJ Hierarchy Pattern Tightening Tests ────────────────────────
+
+
+class TestXjLevel2PatternSelectivity:
+    """Level 2 (section) pattern must require 2+ uppercase words, rejecting single-word OCR artifacts."""
+
+    @pytest.fixture
+    def level2_pattern(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        level2 = [h for h in profile.hierarchy if h.level == 2][0]
+        return re.compile(level2.title_pattern)
+
+    @pytest.mark.parametrize("heading", [
+        "GENERAL INFORMATION",
+        "COOLING SYSTEM",
+        "FUEL INJECTION",
+        "SERVICE PROCEDURES",
+    ])
+    def test_matches_multi_word_section_headings(self, level2_pattern, heading):
+        assert level2_pattern.match(heading), (
+            f"Level 2 pattern should match multi-word heading '{heading}'"
+        )
+
+    @pytest.mark.parametrize("artifact", [
+        "SWITCH",
+        "RELAY",
+        "LAMP",
+        "A",
+    ])
+    def test_rejects_single_word_ocr_artifacts(self, level2_pattern, artifact):
+        assert level2_pattern.match(artifact) is None, (
+            f"Level 2 pattern must reject single-word artifact '{artifact}'"
+        )
+
+
+class TestXjLevel3PatternSelectivity:
+    """Level 3 (procedure) pattern must require 2+ words, rejecting single-word OCR artifacts."""
+
+    @pytest.fixture
+    def level3_pattern(self, xj_profile_path):
+        profile = load_profile(xj_profile_path)
+        level3 = [h for h in profile.hierarchy if h.level == 3][0]
+        return re.compile(level3.title_pattern)
+
+    @pytest.mark.parametrize("heading", [
+        "REMOVAL AND INSTALLATION",
+        "DIAGNOSIS AND TESTING",
+        "JUMP STARTING PROCEDURE",
+        "THERMOSTAT - REMOVAL AND INSTALLATION",
+        "RADIATOR DRAINING AND REFILLING",
+    ])
+    def test_matches_multi_word_procedure_headings(self, level3_pattern, heading):
+        assert level3_pattern.match(heading), (
+            f"Level 3 pattern should match multi-word heading '{heading}'"
+        )
+
+    @pytest.mark.parametrize("artifact", [
+        "SWITCH",
+        "CHECK",
+        "LAMP",
+        "RELAY",
+    ])
+    def test_rejects_single_word_ocr_artifacts(self, level3_pattern, artifact):
+        assert level3_pattern.match(artifact) is None, (
+            f"Level 3 pattern must reject single-word artifact '{artifact}'"
+        )
+
+
 # ── Boundary Validation Tests ─────────────────────────────────────
 
 
@@ -229,6 +299,386 @@ class TestValidateBoundaries:
         profile = load_profile(xj_profile_path)
         warnings = validate_boundaries([], profile)
         assert warnings == []
+
+
+# ── Boundary Post-Filter Tests ────────────────────────────────────
+
+
+class TestFilterBoundaries:
+    """Test filter_boundaries() post-filter logic."""
+
+    @pytest.fixture
+    def _make_profile(self, xj_profile_path):
+        """Return a helper that loads the XJ profile and patches hierarchy filter fields."""
+        from pipeline.profile import load_profile
+
+        def _inner(
+            min_gap_lines: int = 0,
+            min_content_words: int = 0,
+            require_blank_before: bool = False,
+            target_level: int = 3,
+        ):
+            profile = load_profile(xj_profile_path)
+            for h in profile.hierarchy:
+                if h.level == target_level:
+                    h.min_gap_lines = min_gap_lines
+                    h.min_content_words = min_content_words
+                    h.require_blank_before = require_blank_before
+            return profile
+
+        return _inner
+
+    # ── min_gap_lines ────────────────────────────────────
+
+    def test_min_gap_lines_removes_close_boundary(self, _make_profile):
+        """Back-to-back level-3 boundaries with gap < min_gap_lines: second removed."""
+        profile = _make_profile(min_gap_lines=3)
+        # Page with two procedure headings only 1 line apart (lines 2 and 3)
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "FIRST HEADING PROCEDURE\n"
+            "SECOND HEADING PROCEDURE\n"
+            "some content words here to pad things out\n"
+            "more filler content here"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="FIRST HEADING PROCEDURE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="SECOND HEADING PROCEDURE", page_number=0, line_number=3),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        assert len(level3) == 1
+        assert level3[0].title == "FIRST HEADING PROCEDURE"
+
+    def test_min_gap_lines_keeps_distant_boundary(self, _make_profile):
+        """Level-3 boundaries with gap >= min_gap_lines: both kept."""
+        profile = _make_profile(min_gap_lines=3)
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "FIRST HEADING PROCEDURE\n"
+            "filler line\n"
+            "filler line\n"
+            "\n"
+            "SECOND HEADING PROCEDURE\n"
+            "some content words here to pad things out"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="FIRST HEADING PROCEDURE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="SECOND HEADING PROCEDURE", page_number=0, line_number=6),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        assert len(level3) == 2
+
+    # ── min_content_words ────────────────────────────────
+
+    def test_min_content_words_removes_below_threshold(self, _make_profile):
+        """Boundary with fewer content words than threshold is removed."""
+        profile = _make_profile(min_content_words=5)
+        # Lines: 0="7 Cooling System", 1="", 2="SPARSE HEADING HERE",
+        #        3="ok", 4="", 5="REAL HEADING PROCEDURE",
+        #        6="lots of words to make this section clearly large enough"
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "SPARSE HEADING HERE\n"
+            "ok\n"
+            "\n"
+            "REAL HEADING PROCEDURE\n"
+            "lots of words to make this section clearly large enough"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="SPARSE HEADING HERE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="REAL HEADING PROCEDURE", page_number=0, line_number=5),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        # SPARSE boundary covers lines 2..4: "SPARSE HEADING HERE" (3) + "ok" (1) + "" (0) = 4 words < 5
+        assert len(level3) == 1
+        assert level3[0].title == "REAL HEADING PROCEDURE"
+
+    def test_min_content_words_keeps_above_threshold(self, _make_profile):
+        """Boundary with enough content words is kept."""
+        profile = _make_profile(min_content_words=5)
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "GOOD HEADING PROCEDURE\n"
+            "this line has plenty of words to exceed the threshold\n"
+            "even more content here for good measure"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="GOOD HEADING PROCEDURE", page_number=0, line_number=2),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        assert len(level3) == 1
+
+    # ── require_blank_before ─────────────────────────────
+
+    def test_require_blank_before_removes_without_blank(self, _make_profile):
+        """Boundary without a preceding blank line is removed when required."""
+        profile = _make_profile(require_blank_before=True)
+        # Line 2 is the boundary; line 1 is "content" (not blank)
+        pages = [
+            "7 Cooling System\n"
+            "content right before heading\n"
+            "HEADING WITHOUT BLANK BEFORE\n"
+            "some content words here to pad things out more and more"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="HEADING WITHOUT BLANK BEFORE", page_number=0, line_number=2),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        assert len(level3) == 0
+
+    def test_require_blank_before_keeps_with_blank(self, _make_profile):
+        """Boundary preceded by a blank line is kept."""
+        profile = _make_profile(require_blank_before=True)
+        # Line 1 is blank, line 2 is the boundary
+        pages = [
+            "7 Cooling System\n"
+            "\n"
+            "HEADING WITH BLANK BEFORE\n"
+            "some content words here to pad things out more and more"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="HEADING WITH BLANK BEFORE", page_number=0, line_number=2),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        assert len(level3) == 1
+
+    def test_require_blank_before_removes_at_line_zero(self, _make_profile):
+        """Boundary at line 0 (no preceding line) is removed when require_blank_before=True."""
+        profile = _make_profile(require_blank_before=True, target_level=1)
+        pages = ["HEADING AT LINE ZERO\nsome content words here"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="HEADING AT LINE ZERO", page_number=0, line_number=0),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 0
+
+    # ── All filters disabled (backward compat) ───────────
+
+    def test_all_filters_disabled_passes_through(self, _make_profile):
+        """With all filter fields at defaults (0/False), boundaries are unchanged."""
+        profile = _make_profile(min_gap_lines=0, min_content_words=0, require_blank_before=False)
+        pages = [
+            "7 Cooling System\n"
+            "content\n"
+            "HEADING ONE PROCEDURE\n"
+            "HEADING TWO PROCEDURE\n"
+            "some content"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="HEADING ONE PROCEDURE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="HEADING TWO PROCEDURE", page_number=0, line_number=3),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == len(boundaries)
+
+    # ── Multiple filters combined ────────────────────────
+
+    def test_multiple_filters_applied_together(self, _make_profile):
+        """Combining min_gap_lines, min_content_words, and require_blank_before."""
+        profile = _make_profile(min_gap_lines=3, min_content_words=5, require_blank_before=True)
+        # Lines:
+        # 0: "7 Cooling System"
+        # 1: ""
+        # 2: "GOOD HEADING PROCEDURE"  -- blank before, enough words after, first at level 3
+        # 3: "word1 word2 word3 word4 word5 word6"
+        # 4: ""
+        # 5: "BAD GAP HEADING HERE"    -- blank before, but gap from line 2 is only 3 (exactly min)
+        # 6: "word1 word2 word3 word4 word5 word6"
+        # 7: ""
+        # 8: "NO BLANK BEFORE HEADING" -- NOT preceded by blank (line 7 is blank... wait)
+        # Need to construct carefully.
+        pages = [
+            "7 Cooling System\n"       # line 0
+            "\n"                         # line 1
+            "GOOD HEADING PROCEDURE\n"   # line 2  -- blank before (line 1), enough words, first lvl3
+            "word1 word2 word3 word4 word5 word6\n"  # line 3
+            "BAD NO BLANK HEADING\n"     # line 4  -- NOT blank before (line 3 has content) => removed by require_blank_before
+            "word1 word2 word3 word4 word5 word6\n"  # line 5
+            "\n"                         # line 6
+            "CLOSE GAP HEADING HERE\n"   # line 7  -- blank before (line 6), but if GOOD at 2 survived, gap=5 >= 3 ✓
+            "ok\n"                       # line 8  -- only 1 word + heading = few words
+            "\n"                         # line 9
+            "SPARSE CONTENT HEADING\n"   # line 10 -- blank before, gap from 7 = 3, but content < 5 words
+            "hi"                         # line 11
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=3, level_name="procedure", id=None, title="GOOD HEADING PROCEDURE", page_number=0, line_number=2),
+            Boundary(level=3, level_name="procedure", id=None, title="BAD NO BLANK HEADING", page_number=0, line_number=4),
+            Boundary(level=3, level_name="procedure", id=None, title="CLOSE GAP HEADING HERE", page_number=0, line_number=7),
+            Boundary(level=3, level_name="procedure", id=None, title="SPARSE CONTENT HEADING", page_number=0, line_number=10),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        level3 = [b for b in filtered if b.level == 3]
+        # GOOD (line 2): blank before ✓, first at level ✓, words >= 5 ✓ => KEPT
+        # BAD NO BLANK (line 4): no blank before (line 3 has content) => REMOVED by require_blank_before
+        # CLOSE GAP (line 7): blank before (line 6) ✓, gap from 2 = 5 >= 3 ✓
+        #   content lines 7..9 = "CLOSE GAP HEADING HERE" (4) + "ok" (1) + "" (0) = 5 words (not < 5) => KEPT
+        # SPARSE (line 10): blank before ✓, gap from 7 = 3 >= 3 ✓
+        #   content lines 10..11 = "SPARSE CONTENT HEADING" (3) + "hi" (1) = 4 words < 5 => REMOVED
+        assert len(level3) == 2
+        titles = [b.title for b in level3]
+        assert "GOOD HEADING PROCEDURE" in titles
+        assert "CLOSE GAP HEADING HERE" in titles
+
+    def test_empty_boundaries_returns_empty(self, _make_profile):
+        """Filtering an empty list returns an empty list."""
+        profile = _make_profile(min_gap_lines=3, min_content_words=5, require_blank_before=True)
+        filtered = filter_boundaries([], profile, ["some text"])
+        assert filtered == []
+
+    def test_filter_does_not_affect_other_levels(self, _make_profile):
+        """Filters on level 3 do not remove level 1 or level 2 boundaries."""
+        profile = _make_profile(min_gap_lines=10, min_content_words=100, require_blank_before=True)
+        pages = [
+            "7 Cooling System\n"
+            "content here\n"
+            "SERVICE PROCEDURES\n"
+            "more content"
+        ]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling System", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="SERVICE PROCEDURES", page_number=0, line_number=2),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        # Level 1 and 2 have default filter settings (0/False), so all pass
+        assert len(filtered) == 2
+
+
+# ── Require Known ID Filter Tests ─────────────────────────────────
+
+
+class TestRequireKnownId:
+    """Test Pass 0 require_known_id filtering in filter_boundaries()."""
+
+    @pytest.fixture
+    def _make_profile_with_require(self, xj_profile_path):
+        """Return a helper that loads the XJ profile and configures require_known_id."""
+        from pipeline.profile import load_profile as _load
+
+        def _inner(
+            require_known_id: bool = False,
+            known_ids: list[dict[str, str]] | None = None,
+            target_level: int = 1,
+        ):
+            profile = _load(xj_profile_path)
+            for h in profile.hierarchy:
+                if h.level == target_level:
+                    h.require_known_id = require_known_id
+                    if known_ids is not None:
+                        h.known_ids = known_ids
+            return profile
+
+        return _inner
+
+    def test_require_known_id_rejects_unknown(self, _make_profile_with_require):
+        """Boundaries with IDs not in known_ids are rejected when require_known_id is True."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}, {"id": "9", "title": "Engine"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="9", title="Engine", page_number=0, line_number=5),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+            Boundary(level=1, level_name="group", id="1999", title="Also Unknown", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        surviving_ids = [b.id for b in filtered]
+        assert "7" in surviving_ids
+        assert "9" in surviving_ids
+        assert "42" not in surviving_ids
+        assert "1999" not in surviving_ids
+        assert len(filtered) == 2
+
+    def test_require_known_id_false_passes_all(self, _make_profile_with_require):
+        """When require_known_id is False, all boundaries pass regardless of known_ids."""
+        profile = _make_profile_with_require(
+            require_known_id=False,
+            known_ids=[{"id": "7", "title": "Cooling"}, {"id": "9", "title": "Engine"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="9", title="Engine", page_number=0, line_number=5),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+            Boundary(level=1, level_name="group", id="1999", title="Also Unknown", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 4
+
+    def test_require_known_id_empty_known_ids_passes_all(self, _make_profile_with_require):
+        """When require_known_id is True but known_ids is empty, all boundaries pass (guard clause)."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="42", title="Unknown", page_number=0, line_number=10),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 2
+
+    def test_require_known_id_none_id_rejected(self, _make_profile_with_require):
+        """Boundary with id=None is rejected when require_known_id is True."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id=None, title="No ID", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=5),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        assert len(filtered) == 1
+        assert filtered[0].id == "7"
+
+    def test_require_known_id_only_affects_configured_level(self, _make_profile_with_require):
+        """require_known_id on L1 does not filter L2 boundaries."""
+        profile = _make_profile_with_require(
+            require_known_id=True,
+            known_ids=[{"id": "7", "title": "Cooling"}],
+            target_level=1,
+        )
+        pages = ["dummy content with enough words for everyone"]
+        boundaries = [
+            Boundary(level=1, level_name="group", id="7", title="Cooling", page_number=0, line_number=0),
+            Boundary(level=1, level_name="group", id="42", title="Unknown Group", page_number=0, line_number=5),
+            Boundary(level=2, level_name="section", id="UNKNOWN_SECTION", title="UNKNOWN SECTION", page_number=0, line_number=10),
+            Boundary(level=2, level_name="section", id="ANOTHER", title="ANOTHER SECTION", page_number=0, line_number=15),
+        ]
+        filtered = filter_boundaries(boundaries, profile, pages)
+        # L1: only "7" survives (42 rejected). L2: both pass (not configured).
+        level1 = [b for b in filtered if b.level == 1]
+        level2 = [b for b in filtered if b.level == 2]
+        assert len(level1) == 1
+        assert level1[0].id == "7"
+        assert len(level2) == 2
 
 
 # ── Manifest Building Tests ───────────────────────────────────────

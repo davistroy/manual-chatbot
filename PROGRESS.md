@@ -36,7 +36,29 @@
 | 2026-02-16 | Phase 4.2: Type ManifestEntry ranges | src/pipeline/structural_parser.py, src/pipeline/chunk_assembly.py, tests/ | 0 new tests (refactoring) |
 | 2026-02-16 | Phase 4.3: Multi-page test fixtures | tests/conftest.py, tests/test_structural_parser.py, tests/test_chunk_assembly.py | 22 new tests |
 
+### Output Quality Implementation (Implementation Plan v3)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-16 | Phase 1: Mandatory known_ids filter (1.1-1.4) | schema/manual_profile_v1.schema.json, src/pipeline/profile.py, src/pipeline/structural_parser.py, tests/test_structural_parser.py | 5 new tests |
+| 2026-02-16 | Phase 3: Cross-ref namespace fix (3.1-3.3) | src/pipeline/chunk_assembly.py, src/pipeline/qa.py, tests/test_chunk_assembly.py, tests/test_qa.py | 5 new tests |
+| 2026-02-16 | Phase 2: Production XJ profile (2.1-2.2) | profiles/xj-1999.yaml (new), tests/test_profile.py | 6 new tests |
+| 2026-02-16 | Phase 4: End-to-end validation (4.1-4.5) | src/pipeline/qa.py | 0 new tests (validation + tuning) |
+
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases). Full test suite: **349 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests). Full test suite: **439 tests passing** (up from 250 baseline).
+
+### Output Quality Results (XJ 1999 Service Manual)
+
+| Metric | Before | Target | After |
+|--------|--------|--------|-------|
+| Total chunks | 2,408 | 1,500-2,500 | 2,137 |
+| Cross-ref errors | 113 | 0 | 0 |
+| Cross-ref warnings (8W) | 0 | ~3 | 5 |
+| known_ids warnings | 1,716 | <20 | 4 |
+| Undersized chunks (<100 words) | 637 (26%) | <10% | 249 (11.7%) |
+| Mean words/chunk | — | — | 248 |
+| QA passed | False | **True** | **True** |
+
 No `NotImplementedError` remains in any source module.

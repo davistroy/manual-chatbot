@@ -23,7 +23,9 @@ from pipeline.chunk_assembly import (
     detect_safety_callouts,
     detect_step_sequences,
     detect_tables,
+    enrich_chunk_metadata,
     load_chunks,
+    merge_small_across_entries,
     save_chunks,
     tag_vehicle_applicability,
 )
@@ -420,6 +422,175 @@ class TestRuleR6MergeSmall:
     def test_single_small_chunk_stays(self):
         result = apply_rule_r6_merge_small(["Tiny."], min_tokens=200)
         assert len(result) == 1
+
+
+# ── Cross-Entry Merge Tests ───────────────────────────────────────
+
+
+class TestCrossEntryMerge:
+    """Test merge_small_across_entries — post-assembly merge of tiny chunks."""
+
+    def _make_chunk(
+        self, chunk_id: str, word_count: int, manual_id: str = "m1"
+    ) -> Chunk:
+        """Build a Chunk with *word_count* words of filler text."""
+        text = " ".join(f"word{i}" for i in range(word_count))
+        return Chunk(
+            chunk_id=chunk_id,
+            manual_id=manual_id,
+            text=text,
+            metadata={"level1_id": chunk_id.split("::")[1] if "::" in chunk_id else ""},
+        )
+
+    def test_tiny_chunks_absorbed_into_next_sibling(self):
+        """Chunks of [10, 5, 300, 8, 400] words — tiny ones merge into next sibling."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 10),
+            self._make_chunk("m1::A::p2", 5),
+            self._make_chunk("m1::A::p3", 300),
+            self._make_chunk("m1::A::p4", 8),
+            self._make_chunk("m1::A::p5", 400),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The three tiny chunks (10, 5, 8 words) should be absorbed;
+        # we expect fewer chunks than the original 5
+        assert len(result) < len(chunks)
+        # The 300-word and 400-word chunks should survive (possibly with
+        # prepended text from tiny predecessors)
+        all_text = " ".join(c.text for c in result)
+        assert "word299" in all_text  # from the 300-word chunk
+        assert "word399" in all_text  # from the 400-word chunk
+
+    def test_no_merge_across_level1_boundary(self):
+        """Chunks spanning a level-1 boundary must NOT merge across it."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 10),   # tiny, group A
+            self._make_chunk("m1::B::p1", 300),   # large, group B
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The tiny chunk in group A should NOT merge into the group-B chunk
+        assert len(result) == 2
+
+    def test_single_tiny_chunk_at_end_of_group_kept(self):
+        """A tiny chunk at the end of its group with no next sibling stays as-is."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 300),
+            self._make_chunk("m1::A::p2", 10),    # tiny, last in group A
+            self._make_chunk("m1::B::p1", 300),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The tiny chunk cannot merge forward (next chunk is group B),
+        # so it stays. We expect 3 chunks.
+        assert len(result) == 3
+
+    def test_convergence_chain_of_tiny_chunks(self):
+        """A chain of tiny chunks all merge in sequence until stable."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 5),
+            self._make_chunk("m1::A::p2", 5),
+            self._make_chunk("m1::A::p3", 5),
+            self._make_chunk("m1::A::p4", 5),
+            self._make_chunk("m1::A::p5", 300),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # All four 5-word chunks should eventually cascade-merge into the
+        # 300-word chunk, leaving a single chunk
+        assert len(result) == 1
+        # The surviving chunk should contain text from the first tiny chunk
+        assert "word0" in result[0].text
+        # And text from the 300-word chunk
+        assert "word299" in result[0].text
+
+    def test_empty_list_returns_empty(self):
+        """An empty chunk list returns an empty list."""
+        result = merge_small_across_entries([], min_tokens=200)
+        assert result == []
+
+    def test_absorbing_chunk_keeps_its_own_metadata(self):
+        """When a tiny chunk is absorbed, the absorbing chunk keeps its own metadata."""
+        tiny = Chunk(
+            chunk_id="m1::A::p1",
+            manual_id="m1",
+            text="tiny text",
+            metadata={"level1_id": "A", "procedure_name": "Tiny Proc"},
+        )
+        big = Chunk(
+            chunk_id="m1::A::p2",
+            manual_id="m1",
+            text=" ".join(f"w{i}" for i in range(300)),
+            metadata={"level1_id": "A", "procedure_name": "Big Proc"},
+        )
+        result = merge_small_across_entries([tiny, big], min_tokens=200)
+        assert len(result) == 1
+        assert result[0].metadata["procedure_name"] == "Big Proc"
+        assert result[0].chunk_id == "m1::A::p2"
+
+    def test_all_large_chunks_unchanged(self):
+        """Chunks all above min_tokens pass through unchanged."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 300),
+            self._make_chunk("m1::A::p2", 400),
+            self._make_chunk("m1::A::p3", 500),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        assert len(result) == 3
+
+    def test_merge_blocked_when_combined_exceeds_max_tokens(self):
+        """A small chunk should NOT merge into a large sibling if the result exceeds max_tokens."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 150),   # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 1900),   # large — 150+1900 = 2050 > 2000
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=2000)
+        assert len(result) == 2, (
+            "Merge should be blocked because combined size (2050) exceeds max_tokens (2000)"
+        )
+
+    def test_merge_succeeds_when_combined_within_max_tokens(self):
+        """A small chunk should merge into the next sibling when combined size is within limit."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 150),   # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 800),   # combined = 150 + 800 = 950 < 2000
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=2000)
+        assert len(result) == 1, (
+            "Merge should succeed because combined size (950) is within max_tokens (2000)"
+        )
+        # The surviving chunk should contain text from both
+        assert "word0" in result[0].text
+        assert "word799" in result[0].text
+
+    def test_custom_max_tokens_respected(self):
+        """A custom max_tokens value (lower than default) should be respected."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 50),    # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 400),   # combined = 50 + 400 = 450 > 300
+        ]
+        # With max_tokens=300, the merge should be blocked
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=300)
+        assert len(result) == 2, (
+            "Custom max_tokens=300 should block merge of combined 450 words"
+        )
+
+        # With max_tokens=500, the merge should succeed
+        result2 = merge_small_across_entries(chunks, min_tokens=200, max_tokens=500)
+        assert len(result2) == 1, (
+            "Custom max_tokens=500 should allow merge of combined 450 words"
+        )
+
+    def test_max_tokens_boundary_exact_limit(self):
+        """A merge producing exactly max_tokens words should be allowed (<=, not <)."""
+        # We need to be precise: the combined text includes "\n\n" separator
+        # which doesn't add words. Build chunks so combined word count == max_tokens.
+        chunks = [
+            self._make_chunk("m1::A::p1", 100),
+            self._make_chunk("m1::A::p2", 400),
+        ]
+        # Combined text: 100 words + "\n\n" + 400 words = 500 words
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=500)
+        assert len(result) == 1, (
+            "Merge at exactly max_tokens boundary should be allowed"
+        )
 
 
 # ── Rule R7: Cross-Ref Merge ──────────────────────────────────────
@@ -1054,6 +1225,141 @@ class TestThreePageChunkAssembly:
             )
 
 
+# ── Skip Sections Tests ──────────────────────────────────────────
+
+
+class TestSkipSections:
+    """Test that skip_sections excludes matching entries from chunk assembly."""
+
+    def _make_manifest(self, manual_id: str, entries: list[ManifestEntry]) -> Manifest:
+        return Manifest(manual_id=manual_id, entries=entries)
+
+    def _make_entry(
+        self, manual_id: str, section_id: str, title: str, start: int, end: int
+    ) -> ManifestEntry:
+        return ManifestEntry(
+            chunk_id=f"{manual_id}::{section_id}",
+            level=1,
+            level_name="group",
+            title=title,
+            hierarchy_path=[title],
+            content_type="section",
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=start, end=end),
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id=None,
+            children=[],
+        )
+
+    def test_skipped_section_produces_zero_chunks(self, xj_profile_path):
+        """Entries matching skip_sections should produce zero chunks."""
+        profile = load_profile(xj_profile_path)
+        # xj_profile has skip_sections: ["8W"]
+        assert "8W" in profile.skip_sections
+
+        page_text = "8W Wiring Diagrams\n\nCircuit A1 - Battery Feed\nCircuit details here."
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+
+        entry = self._make_entry("xj-1999", "8W", "Wiring Diagrams", 0, num_lines)
+        manifest = self._make_manifest("xj-1999", [entry])
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) == 0, "Skipped section should produce zero chunks"
+
+    def test_non_skipped_section_still_produces_chunks(self, xj_profile_path):
+        """Entries NOT in skip_sections should still produce chunks normally."""
+        profile = load_profile(xj_profile_path)
+
+        page_text = "9 Engine\n\nEngine rebuild procedure."
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+
+        entry = self._make_entry("xj-1999", "9", "Engine", 0, num_lines)
+        manifest = self._make_manifest("xj-1999", [entry])
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1, "Non-skipped section should produce chunks"
+
+    def test_backward_compat_no_skip_sections(self, cj_profile_path):
+        """Profile without skip_sections processes all entries (backward compat)."""
+        profile = load_profile(cj_profile_path)
+        assert profile.skip_sections == []
+
+        page_text = "B Lubrication\n\nGeneral information about lubrication."
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+
+        entry = self._make_entry(
+            "cj-universal-53-71", "B", "Lubrication", 0, num_lines
+        )
+        manifest = self._make_manifest("cj-universal-53-71", [entry])
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) >= 1, "No skip_sections means all entries processed"
+
+    def test_skip_prefix_matches_child_sections(self, xj_profile_path):
+        """Entries with chunk_id starting with skipped prefix are also skipped."""
+        profile = load_profile(xj_profile_path)
+
+        page_text = "Connector details.\n\nPin assignments for connector C200."
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+
+        # Child entry under 8W (e.g., xj-1999::8W::C200)
+        entry = ManifestEntry(
+            chunk_id="xj-1999::8W::C200",
+            level=2,
+            level_name="section",
+            title="Connector C200",
+            hierarchy_path=["Wiring Diagrams", "Connector C200"],
+            content_type="section",
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=0, end=num_lines),
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id="xj-1999::8W",
+            children=[],
+        )
+        manifest = self._make_manifest("xj-1999", [entry])
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        assert len(chunks) == 0, "Child of skipped section should also be skipped"
+
+    def test_mixed_entries_only_skipped_excluded(self, xj_profile_path):
+        """With mixed entries, only the ones matching skip_sections are excluded."""
+        profile = load_profile(xj_profile_path)
+
+        page_text = (
+            "9 Engine\n"
+            "Engine information.\n"
+            "8W Wiring Diagrams\n"
+            "Wiring info."
+        )
+        pages = [page_text]
+        lines = page_text.split("\n")
+
+        entry_engine = self._make_entry("xj-1999", "9", "Engine", 0, 2)
+        entry_wiring = self._make_entry("xj-1999", "8W", "Wiring Diagrams", 2, len(lines))
+        manifest = self._make_manifest("xj-1999", [entry_engine, entry_wiring])
+
+        chunks = assemble_chunks(pages, manifest, profile)
+        chunk_ids = [c.chunk_id for c in chunks]
+        # Engine entry should produce chunks
+        assert any("9" in cid for cid in chunk_ids), "Engine entry should produce chunks"
+        # Wiring entry should be skipped
+        assert not any("8W" in cid for cid in chunk_ids), "Wiring entry should be skipped"
+
+
 # ── Chunk Persistence (JSONL) Tests ──────────────────────────────
 
 
@@ -1288,3 +1594,170 @@ class TestChunkPersistenceRoundTrip:
             assert load.manual_id == orig.manual_id
             assert load.text == orig.text
             assert load.metadata == orig.metadata
+
+
+# -- Metadata Enrichment Tests -----------------------------------------
+
+
+class TestEnrichChunkMetadata:
+    """Test enrich_chunk_metadata() — per-chunk safety, figure, and cross-ref scanning."""
+
+    def test_warning_callout_detected(self, xj_profile_path):
+        """Chunk containing 'WARNING: DO NOT...' should populate has_safety_callouts."""
+        profile = load_profile(xj_profile_path)
+        text = "WARNING: DO NOT REMOVE THE CAP WHILE ENGINE IS HOT."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert "warning" in metadata["has_safety_callouts"]
+
+    def test_caution_callout_detected(self, xj_profile_path):
+        """Chunk containing 'CAUTION:' should populate has_safety_callouts."""
+        profile = load_profile(xj_profile_path)
+        text = "CAUTION: Use only the specified coolant mixture."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert "caution" in metadata["has_safety_callouts"]
+
+    def test_figure_reference_detected(self, xj_profile_path):
+        """Chunk containing '(Fig. 12)' should populate figure_references."""
+        profile = load_profile(xj_profile_path)
+        text = "Connect the cable as shown (Fig. 12)."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert "12" in metadata["figure_references"]
+
+    def test_cross_reference_detected(self, xj_profile_path):
+        """Chunk containing 'Refer to Group 8A' should populate cross_references."""
+        profile = load_profile(xj_profile_path)
+        text = "Refer to Group 8A for battery procedures."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert "8A" in metadata["cross_references"]
+
+    def test_no_matches_yields_empty_lists(self, xj_profile_path):
+        """Chunk with no safety/figure/crossref content has all three as empty lists."""
+        profile = load_profile(xj_profile_path)
+        text = "Check the tire pressure regularly."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["has_safety_callouts"] == []
+        assert metadata["figure_references"] == []
+        assert metadata["cross_references"] == []
+
+    def test_multiple_callout_types_sorted_and_deduplicated(self, xj_profile_path):
+        """Chunk with multiple callout types returns sorted, deduplicated list."""
+        profile = load_profile(xj_profile_path)
+        text = (
+            "WARNING: High voltage present.\n"
+            "\n"
+            "CAUTION: Wear safety glasses.\n"
+            "\n"
+            "WARNING: Another warning about voltage."
+        )
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["has_safety_callouts"] == ["caution", "warning"]
+
+    def test_multiple_figure_refs_deduplicated(self, xj_profile_path):
+        """Multiple occurrences of the same figure ref are deduplicated."""
+        profile = load_profile(xj_profile_path)
+        text = "See (Fig. 3) for details. Refer back to (Fig. 3) and also (Fig. 7)."
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["figure_references"] == ["3", "7"]
+
+    def test_multiple_cross_refs_deduplicated(self, xj_profile_path):
+        """Multiple cross-references are deduplicated and sorted."""
+        profile = load_profile(xj_profile_path)
+        text = (
+            "Refer to Group 8A for battery testing.\n"
+            "Refer to Group 5 for brake procedures.\n"
+            "Refer to Group 8A for charging."
+        )
+        metadata: dict = {}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["cross_references"] == ["5", "8A"]
+
+    def test_enrichment_overwrites_existing_metadata_keys(self, xj_profile_path):
+        """enrich_chunk_metadata overwrites pre-existing placeholder values."""
+        profile = load_profile(xj_profile_path)
+        text = "WARNING: Hot surface.\nRefer to Group 9 for specs."
+        metadata: dict = {
+            "has_safety_callouts": ["placeholder"],
+            "figure_references": ["old"],
+            "cross_references": ["old"],
+        }
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["has_safety_callouts"] == ["warning"]
+        assert metadata["figure_references"] == []
+        assert metadata["cross_references"] == ["9"]
+
+    def test_enrichment_called_in_assemble_chunks(self, xj_profile_path):
+        """assemble_chunks should produce per-chunk enriched metadata."""
+        profile = load_profile(xj_profile_path)
+        page_text = (
+            "WARNING: DO NOT REMOVE THE RADIATOR CAP WHILE HOT.\n"
+            "\n"
+            "(1) Allow the engine to cool.\n"
+            "(2) Connect the cable (Fig. 1).\n"
+            "\n"
+            "Refer to Group 8A for battery testing."
+        )
+        pages = [page_text]
+        num_lines = len(page_text.split("\n"))
+        entry = ManifestEntry(
+            chunk_id="xj-1999::0::SP::proc",
+            level=3,
+            level_name="procedure",
+            title="Test Procedure",
+            hierarchy_path=["0 Lubrication", "SERVICE PROCEDURES", "Test Procedure"],
+            content_type="procedure",
+            page_range=PageRange(start="1", end="1"),
+            line_range=LineRange(start=0, end=num_lines),
+            vehicle_applicability=["all"],
+            engine_applicability=["all"],
+            drivetrain_applicability=["all"],
+            has_safety_callouts=[],
+            figure_references=[],
+            cross_references=[],
+            parent_chunk_id=None,
+            children=[],
+        )
+        manifest = Manifest(manual_id="xj-1999", entries=[entry])
+        chunks = assemble_chunks(pages, manifest, profile)
+
+        assert len(chunks) >= 1
+        # Find the chunk that has the WARNING text
+        warning_chunks = [c for c in chunks if "WARNING:" in c.text]
+        assert len(warning_chunks) >= 1
+        wc = warning_chunks[0]
+        assert "warning" in wc.metadata["has_safety_callouts"]
+
+        # Find the chunk with the figure reference
+        fig_chunks = [c for c in chunks if "(Fig. 1)" in c.text]
+        assert len(fig_chunks) >= 1
+        assert "1" in fig_chunks[0].metadata["figure_references"]
+
+        # Find the chunk with the cross-reference (qualified with manual_id prefix)
+        xref_chunks = [c for c in chunks if "Refer to Group 8A" in c.text]
+        assert len(xref_chunks) >= 1
+        assert "xj-1999::8A" in xref_chunks[0].metadata["cross_references"]
+
+    def test_enrich_cross_refs_qualified(self, xj_profile_path):
+        """Cross-references are qualified with manual_id:: prefix when manual_id is in metadata."""
+        profile = load_profile(xj_profile_path)
+        text = "Refer to Group 7 for cooling procedures."
+        metadata: dict = {"manual_id": "xj-1999"}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["cross_references"] == ["xj-1999::7"]
+
+    def test_enrich_cross_refs_deduped(self, xj_profile_path):
+        """Duplicate cross-references are deduplicated after qualification."""
+        profile = load_profile(xj_profile_path)
+        text = (
+            "Refer to Group 7 for cooling procedures.\n"
+            "Refer to Group 7 for additional details."
+        )
+        metadata: dict = {"manual_id": "xj-1999"}
+        enrich_chunk_metadata(text, metadata, profile)
+        assert metadata["cross_references"] == ["xj-1999::7"]

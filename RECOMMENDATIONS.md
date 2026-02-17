@@ -1,456 +1,300 @@
 # Improvement Recommendations
 
 **Generated:** 2026-02-16
-**Analyzed Project:** manual-chatbot (Smart Chunking Pipeline for Vehicle Service Manual RAG)
-**Input:** REVIEW.md architectural audit + full codebase analysis
+**Analyzed Project:** manual-chatbot — Smart Chunking Pipeline for Vehicle Service Manual RAG
+**Baseline:** End-to-end XJ pipeline run — 2,408 chunks, 113 errors, 2,379 warnings, QA Failed
+**Supersedes:** Previous RECOMMENDATIONS.md (25,130-chunk baseline — all 3 phases complete, 349 tests passing)
 
 ---
 
 ## Executive Summary
 
-The pipeline's core architecture is sound — TDD foundation, clear module boundaries, well-typed profile system. However, the codebase has three data-integrity defects that will produce incorrect results when processing real multi-page manuals: the cross-page coordinate model conflates per-page line numbers with global offsets, the metadata contract between the assembler and QA/embedding modules is misaligned, and the embedding composition function looks for context in the wrong place. These must be fixed before any real manual processing.
+After completing the initial three-phase remediation (skip list, metadata enrichment, boundary filtering, cross-entry merge), the pipeline processes the 1,948-page 1999 XJ Service Manual into 2,408 chunks — down from 25,130. However, the end-to-end validation run reveals four remaining systemic issues that prevent QA from passing: a cascade hierarchy collapse where 92% of L3 procedure boundaries go undetected, 637 undersized chunks (26%), 1,716 known_ids warnings from an incomplete test-only profile, and a 100% cross-reference validation failure rate (113 errors).
 
-Beyond correctness, the biggest functional gap is that the pipeline is memory-only — chunks are assembled but never persisted. There's no way to inspect, export, or re-use chunked output without re-running the entire pipeline. Combined with a non-functional `bootstrap-profile` command that silently succeeds and a `qa` command that immediately errors, the CLI gives a false impression of capability.
+All four issues trace to a shared root cause: the Level 1 `id_pattern` (`^\d+[A-Z]?[a-z]?\s`) matches any line starting with a digit, producing ~2,748 false L1 boundaries. These false L1 hits reset the disambiguation algorithm's `current_level`, causing L2 to always win over L3 (since L3 is "deeper" but context keeps getting reset). The fix is surgical — a mandatory known_ids filter that rejects L1 boundaries not in the known group list, combined with a production-quality profile that has closed-vocabulary L3 patterns and complete group inventory.
 
-Reliability is the third concern: HTTP calls to Ollama have no timeout, SQLite errors are silently swallowed in retrieval, and Qdrant point IDs are non-deterministic across runs. These will cause silent degradation or hanging in production.
+Beyond these immediate output quality fixes, the analysis identifies opportunities for developer experience improvements (integration testing gap, validation UX), architectural resilience (disambiguation algorithm sensitivity), and future extensibility (profile bootstrapping, multi-manual regression).
 
 ---
 
 ## Recommendation Categories
 
-### Category 1: Data Integrity (Critical Correctness)
+### Category 1: Output Quality Enhancements
 
-#### D1. Fix cross-page chunk slicing coordinate model
-
-**Priority:** Critical
-**Effort:** M
-**Impact:** Without this fix, chunk text extraction produces wrong content for any manual longer than one page — which is every real manual.
-
-**Current State:**
-`detect_boundaries()` records `page_number` (0-indexed page) and `line_number` (line offset *within that page*). `build_manifest()` stores `line_range.start = boundary.line_number` directly. Then `assemble_chunks()` joins all pages into one global line list and slices by `line_range.start` as if it's a global offset. For a boundary at page 5, line 12, the assembler slices at global line 12 — which is page 0, line 12.
-
-**Recommendation:**
-Convert to absolute global line offsets at boundary detection time. Track a running `global_line_offset` as pages are iterated, and store `boundary.line_number = global_line_offset + line_idx`. This makes the manifest's `line_range` values directly usable by `assemble_chunks()` without any coordinate translation.
-
-**Implementation Notes:**
-- Affects `structural_parser.py:79-130` (detect_boundaries loop) and `structural_parser.py:236-237` (build_manifest line_range assignment)
-- Tests in `test_structural_parser.py` that assert per-page line numbers will need updating
-- Must verify with multi-page test fixture (current fixtures are single-page, so the bug is latent)
-- Add a multi-page integration test that catches this regression
-
----
-
-#### D2. Align metadata contract between assembler, QA, and embeddings
+#### Q1. Mandatory known_ids Boundary Filter
 
 **Priority:** Critical
 **Effort:** S
-**Impact:** QA `check_metadata_completeness` always reports false errors for `manual_id` and `level1_id`. SQLite index writes empty strings for `procedure_name` and `level1_id`.
+**Impact:** Eliminates ~2,700 false L1 boundaries; unblocks correct hierarchy detection for all deeper levels
 
 **Current State:**
-QA requires `manual_id`, `level1_id`, `content_type` in `chunk.metadata` (`qa.py:169`). The assembler populates `content_type` but omits `manual_id` and `level1_id` (`chunk_assembly.py:682-693`). Meanwhile `manual_id` is on `chunk.manual_id` (top-level field), not in metadata. `level1_id` is never computed.
-
-The SQLite index in `embeddings.py:193-198` reads `metadata.get("procedure_name", "")` and `metadata.get("level1_id", "")`, getting empty strings for both.
+`filter_boundaries()` has three filter passes (blank-line, gap, content-words) but no mechanism to reject boundaries with unrecognized IDs. The `validate_boundaries()` function produces advisory warnings only. The L1 pattern `^\d+[A-Z]?[a-z]?\s` matches any line starting with a digit, producing 2,748 L1 boundaries when only ~55 are real. These false L1 boundaries reset `current_level` in the disambiguation logic at `structural_parser.py:136-140`, causing L2 to always win over L3.
 
 **Recommendation:**
-Add `manual_id` and `level1_id` to the metadata dict in `assemble_chunks()`. Extract `level1_id` from `entry.hierarchy_path[0]` or from `entry.chunk_id` (first segment after manual_id). Add `procedure_name` from `entry.title`. This aligns all three consumers (QA, embeddings/SQLite, retrieval).
+Add `require_known_id: bool = False` to `HierarchyLevel` dataclass. When `true` and `known_ids` is non-empty, `filter_boundaries()` inserts a new Pass 0 that rejects any boundary at that level whose extracted ID is not in the known set. Boundaries with `id=None` are also rejected. This is a 3-file change (schema, dataclass, filter) with zero behavior change for existing profiles.
 
 **Implementation Notes:**
-- One-line additions to the metadata dict at `chunk_assembly.py:682`
-- Update tests that assert metadata keys
-- Consider whether `manual_id` should remain *only* on `chunk.manual_id` or be duplicated into metadata — consensus from REVIEW.md is to put it in both for payload consistency
+- Must run as Pass 0 before other filter passes so downstream passes operate on clean data
+- Defaults to `false` — existing tests and profiles are completely unaffected
+- The known_ids list already exists on `HierarchyLevel` — this just makes it enforceable
+- 5 new tests to cover: reject unknown, pass all when false, empty known_ids guard, None id rejection, level isolation
 
 ---
 
-#### D3. Fix embedding composition to use metadata header
+#### Q2. Closed-Vocabulary L3 Procedure Detection
 
 **Priority:** Critical
 **Effort:** S
-**Impact:** Embedding quality is degraded because the hierarchical context (manual > group > section > procedure) is missing from the embedding input.
+**Impact:** Increases procedure detection from 82 to 500+ boundaries; fixes the core "92% procedures missed" defect
 
 **Current State:**
-`compose_embedding_input()` (`embeddings.py:29-61`) splits `chunk.text` on the first `\n\n` assuming the header is baked into the text. But the assembler stores the hierarchical header in `metadata["hierarchical_header"]` and puts only body text in `chunk.text`.
+L3 `title_pattern` is `^([A-Z]{2,}(?:\s+[A-Z/\-\(\) ]{2,})+)$` — a strict superset of L2's pattern. The disambiguation logic always picks L2 because it's shallower. Single-word procedures like "REMOVAL" and "INSTALLATION" require `{2,}` words, so they never match. The `require_blank_before: true` filter kills 74.5% of remaining matches because OCR output lacks consistent blank lines.
 
 **Recommendation:**
-Change `compose_embedding_input()` to build embedding text from `chunk.metadata["hierarchical_header"] + "\n\n" + first_150_words(chunk.text)`. This was the agreed approach from the REVIEW.md discussion.
+Replace the generic L3 pattern with a closed vocabulary of Chrysler standardized procedure keywords: `REMOVAL AND INSTALLATION`, `REMOVAL`, `INSTALLATION`, `DIAGNOSIS AND TESTING`, `DESCRIPTION AND OPERATION`, `DISASSEMBLY AND ASSEMBLY`, `CLEANING AND INSPECTION`, `ADJUSTMENT`, `OVERHAUL`, `SPECIFICATIONS`, `SPECIAL TOOLS`, `TORQUE CHART`, `TORQUE SPECIFICATIONS`. Remove `require_blank_before` for this level. Add negative lookahead to L2 pattern to prevent L2/L3 overlap entirely.
 
 **Implementation Notes:**
-- Straightforward change to `embeddings.py:29-61`
-- Update `test_embeddings.py` tests for `compose_embedding_input`
-- The old `\n\n` split logic becomes dead code — remove it
+- Profile-only change (production profile, not code)
+- Multi-word patterns listed before single-word to avoid partial matches
+- `min_content_words: 3` retained as a light false-positive guard
+- `min_gap_lines: 0` — procedure headings can appear close together
+- `require_blank_before: false` — only 25.5% of procedure headings have a preceding blank line
 
 ---
 
-### Category 2: Reliability & Error Handling
-
-#### R1. Add timeout and retry for embedding HTTP calls
-
-**Priority:** High
-**Effort:** S
-**Impact:** Without a timeout, `generate_embedding()` will hang indefinitely if Ollama is unresponsive. No retry means transient failures kill the entire indexing run.
-
-**Current State:**
-`requests.post(url, json=payload)` at `embeddings.py:79` has no `timeout` parameter.
-
-**Recommendation:**
-Add `timeout=30` (seconds) to the `requests.post()` call. Add a simple retry with exponential backoff (3 attempts, 1s/2s/4s) for transient errors (connection errors, 5xx responses). Use `requests.adapters.HTTPAdapter` with `urllib3.util.retry.Retry`, or a simple loop — no new dependency needed.
-
-**Implementation Notes:**
-- Keep it simple: a `for attempt in range(3)` loop with `time.sleep(2 ** attempt)` on failure
-- Raise `RuntimeError` with clear message after exhausting retries
-- Add a test that mocks `requests.post` to raise `ConnectionError` and verify retry behavior
-
----
-
-#### R2. Surface retrieval failures instead of silently swallowing
-
-**Priority:** High
-**Effort:** S
-**Impact:** Silent `except sqlite3.Error: pass` at `retrieval.py:354` means database corruption, schema mismatches, or file permission issues go undetected. Users get degraded results with no indication why.
-
-**Current State:**
-`resolve_cross_references()` wraps the entire SQLite interaction in a bare `except sqlite3.Error: pass`.
-
-**Recommendation:**
-Log the error and re-raise as a warning rather than silently swallowing. Use `warnings.warn()` or (after logging is added) `logger.warning()`. Return partial results but surface the failure. Also add the same pattern to `enrich_with_parent()` and `enrich_with_siblings()` which add placeholder results with empty text — document that these are stubs that need production implementation.
-
-**Implementation Notes:**
-- Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
-- Consider a `retrieval_errors: list[str]` field on `RetrievalResponse` to collect non-fatal errors
-- Minimal change, high diagnostic value
-
----
-
-#### R3. Fix safety callout regex handling inconsistency
-
-**Priority:** High
-**Effort:** S
-**Impact:** Pattern matching may behave differently than intended for case-sensitive vs case-insensitive patterns.
-
-**Current State:**
-`detect_safety_callouts()` at `chunk_assembly.py:141` compiles patterns with `re.IGNORECASE` based on a heuristic (`if sc.pattern[0] != "^"`), then at line 145 uses `re.search(sc.pattern, stripped)` — the raw string, not the compiled pattern. The compiled pattern `pat` is created but never used for matching.
-
-**Recommendation:**
-Use the compiled `pat` for matching instead of `re.search(sc.pattern, ...)`. Delete the redundant `re.search` call. This ensures the intended flag behavior is applied.
-
-**Implementation Notes:**
-- One-line fix: change `re.search(sc.pattern, stripped)` to `pat.search(stripped)` at line 145
-- Same fix needed for the inner loop at line 157: `re.search(sc2.pattern, next_stripped)` should use compiled patterns
-- Add a test with a mixed-case safety pattern to verify the fix
-
----
-
-#### R4. Make `bootstrap-profile` fail fast
+#### Q3. Cross-Reference Namespace Qualification
 
 **Priority:** High
 **Effort:** XS
-**Impact:** Currently returns exit code 0 (success) while doing nothing. Users think bootstrapping worked.
+**Impact:** Eliminates 113 cross-reference errors (100% current failure rate)
 
 **Current State:**
-`cmd_bootstrap_profile()` at `cli.py:128-140` has a `TODO` comment and `return 0`.
+`enrich_chunk_metadata()` at `chunk_assembly.py:744-748` stores bare group numbers (e.g., `"7"`) from regex captures, but `check_cross_ref_validity()` at `qa.py:242-275` validates against qualified chunk ID prefixes (e.g., `"xj-1999::7"`). Every cross-reference fails because the namespace never matches.
 
 **Recommendation:**
-Print an error message to stderr and return exit code 1. Make it clear this feature is planned but not yet implemented.
+Qualify captured cross-reference strings with `{manual_id}::` at creation time in `enrich_chunk_metadata()`. This is a 3-line change. Additionally, downgrade cross-references to skipped sections (e.g., `8W`) from error to warning in `check_cross_ref_validity()`, since those sections are intentionally excluded from chunking.
 
 **Implementation Notes:**
-- 3-line change: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
-- Update CLI test to expect exit code 1
+- Fix is in `chunk_assembly.py` (creation), not `qa.py` (validation)
+- Downgrade logic needs `profile` parameter threaded to `check_cross_ref_validity()`
+- `run_validation_suite()` call site needs updating to pass `profile`
+- Independent of other fixes — can be implemented in parallel with Q1/Q2
+- 5 new tests: qualified resolves, bare fails, skipped section is warning, enrichment qualification, dedup
 
 ---
 
-#### R5. Use deterministic Qdrant point IDs
+#### Q4. Wiring Diagram Leak Prevention
 
 **Priority:** Medium
-**Effort:** S
-**Impact:** Non-idempotent indexing — re-running the pipeline creates duplicate points instead of updating them. Point IDs collide across manual runs.
+**Effort:** S (mostly addressed by Q1)
+**Impact:** Eliminates ~303 undersized wiring diagram fragments (47.6% of all undersized chunks)
 
 **Current State:**
-`index_chunks()` at `embeddings.py:131` assigns `id=i` (sequential integer from 0). Two different manuals both start at 0.
+`skip_sections: ["8W"]` is configured and functional, but wiring diagram content leaks into chunks because false L1 boundaries create incorrect section assignments. The skip logic depends on accurate L1 detection to identify which chunks belong to 8W. With 2,748 false L1 boundaries, section attribution is unreliable.
 
 **Recommendation:**
-Generate deterministic UUIDs from `chunk_id` using `uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id)`. This makes indexing idempotent — re-running with the same chunks overwrites rather than duplicates. Different manuals get different IDs because `chunk_id` includes `manual_id`.
+This is substantially addressed by Q1 (mandatory known_ids filter). With accurate L1 detection, 8W sections will be correctly identified and skipped. Monitor residual leakage during end-to-end validation and add secondary page-range-based filtering if needed.
 
 **Implementation Notes:**
-- `import uuid` + `point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
-- Qdrant supports string UUIDs as point IDs
-- Existing tests that mock Qdrant upsert may need updating for the new ID format
+- No new code expected — resolved as a side effect of Q1
+- Validate during Phase 4 end-to-end run
+- The remaining 52.4% of undersized chunks (header stubs, OCR fragments) will also decrease with better boundary detection
 
 ---
 
-### Category 3: Output Quality & Persistence
-
-#### Q1. Add chunk persistence (JSONL export/import)
+#### Q5. Complete Production Profile for XJ 1999
 
 **Priority:** High
 **Effort:** M
-**Impact:** Without persistence, every analysis requires re-running the full pipeline. No way to inspect chunks, share results, or feed into external tools.
+**Impact:** Transforms pipeline from "only works on test fixtures" to "processes real manuals correctly"
 
 **Current State:**
-Chunks exist only in memory during a pipeline run. `cmd_process()` assembles chunks and prints a count, then exits. No file output.
+The only XJ profile is `tests/fixtures/xj_1999_profile.yaml` with 8 known_ids, loose patterns, and no production tuning. It was designed for unit test isolation, not for processing the actual 1,948-page manual.
 
 **Recommendation:**
-Add `save_chunks(chunks, output_path)` and `load_chunks(input_path)` functions. Use JSONL format (one JSON object per line) for streaming compatibility and easy inspection. Add `--output-dir` flag to `pipeline process` that writes `{manual_id}_chunks.jsonl` and `{manual_id}_manifest.json`.
+Create `profiles/xj-1999.yaml` as a separate production profile with: complete known_ids list (~39 groups from the XJ Tab Locator), closed-vocabulary L3 pattern (Q2), L2 negative lookahead, broader L4 component pattern, and `require_known_id: true` on L1. Keep the test fixture unchanged for unit test stability.
 
 **Implementation Notes:**
-- New functions in `chunk_assembly.py` or a new `persistence.py` module
-- JSONL is preferable to JSON for large outputs (streamable, appendable)
-- Manifest export is equally important — add `save_manifest(manifest, output_path)`
-- Enable offline QA: `pipeline qa --chunks chunks.jsonl --profile profile.yaml`
+- Some group IDs have `a`-suffixed international variants (e.g., `0a`, `9a`) — discover iteratively
+- L4 pattern `^([A-Z][A-Z][A-Z \-/]{1,}(?:\([A-Z0-9\. ]+\))?)$` broadens matching but carries false-positive risk — `min_content_words: 3` guards against empties
+- Profile separation means 349 existing tests are completely unaffected
+- New integration-level test should validate production profile loads and compiles
 
 ---
 
-#### Q2. Implement content-type detection
+### Category 2: Architecture Improvements
+
+#### A1. Boundary Disambiguation Algorithm Resilience
 
 **Priority:** Medium
 **Effort:** M
-**Impact:** `content_type` metadata currently mirrors `level_name` (e.g., "group", "procedure") rather than actual content type (specification_table, wiring_diagram, maintenance_schedule). This limits filtered retrieval.
+**Impact:** Prevents cascade failures when patterns overlap across hierarchy levels
 
 **Current State:**
-`build_manifest()` sets `content_type=boundary.level_name` at `structural_parser.py:235`. This is structural level, not content type. The profile's `content_types` config (maintenance_schedule, wiring_diagrams, specification_tables) is loaded but never used for classification.
+`detect_boundaries()` at `structural_parser.py:126-140` uses a simple disambiguation heuristic: when multiple levels match, pick the shallowest deeper than `current_level`, or reset to the shallowest overall. This creates fragile coupling — if any level matches too broadly, the `current_level` reset cascades through all deeper levels. The L1/L2/L3 overlap exposed this: L1 resets context, L2 always wins over L3, 92% of procedures disappear.
 
 **Recommendation:**
-Add a `classify_content_type(text, entry, profile)` function that examines chunk text for content-type indicators:
-- Specification tables: dot-leaders, columnar data (already detected by `detect_tables()`)
-- Maintenance schedules: interval/mileage keywords
-- Wiring diagrams: wire color codes, connector references
-- Default: "procedure" for step sequences, "general" for everything else
+Not needed for current release — Q1 (known_ids filter) solves the immediate problem by eliminating false L1 boundaries before disambiguation runs. A more robust approach (confidence scoring, pattern specificity weighting, or ML-based heading classification) would be valuable when onboarding manuals with less predictable heading structures. Document the fragility in code comments as a known limitation.
 
 **Implementation Notes:**
-- Add to `chunk_assembly.py` or `structural_parser.py`
-- Use profile's `content_types` config to drive detection heuristics
-- Update metadata dict in `assemble_chunks()` to use classified type
-- This enables retrieval filtering by content type (specs vs procedures vs diagnostics)
+- Deferred to future release
+- Would become important for non-Chrysler manuals with unpredictable heading formats
+- The Q1 filter is the pragmatic fix for the deterministic, closed-vocabulary world of Chrysler manuals
 
 ---
 
-#### Q3. Fix R5 (table integrity) and R8 (figure continuity) no-op implementations
-
-**Priority:** Medium
-**Effort:** S-M
-**Impact:** Two of the eight chunk rules are essentially pass-through functions. Tables can be split and figures can be orphaned.
-
-**Current State:**
-`apply_rule_r5_table_integrity()` at `chunk_assembly.py:411-417` just returns `list(chunks)`. `apply_rule_r8_figure_continuity()` at `chunk_assembly.py:503-525` matches figures but does `result.append(chunk)` in both branches.
-
-**Recommendation:**
-R5: Detect table boundaries within each chunk and prevent splitting across them. If a prior rule split a chunk mid-table, re-merge the table portions. R8: If a chunk starts with a figure reference and the previous chunk contains the describing text (detected by proximity to the reference pattern), merge them.
-
-**Implementation Notes:**
-- `detect_tables()` already exists and works — R5 just needs to use it
-- R8 needs a "figure reference at chunk start" heuristic: if first non-blank line matches figure pattern and previous chunk's last lines reference the same figure, merge
-- Both rules already have the right signatures and position in the pipeline
-- Add targeted tests for each rule showing split-then-reassemble behavior
-
----
-
-### Category 4: Architectural Improvements
-
-#### A1. Type ManifestEntry range fields
-
-**Priority:** Medium
-**Effort:** S
-**Impact:** `page_range: dict[str, str]` and `line_range: dict[str, int]` are accessed via `.get("start", ...)` throughout, which is fragile and untyped.
-
-**Current State:**
-`ManifestEntry` at `structural_parser.py:32-33` uses `dict[str, str]` for page_range and `dict[str, int]` for line_range. These are always `{"start": ..., "end": ...}` but the type system doesn't enforce this.
-
-**Recommendation:**
-Define `Range` dataclasses:
-```python
-@dataclass
-class PageRange:
-    start: str
-    end: str
-
-@dataclass
-class LineRange:
-    start: int
-    end: int
-```
-Replace dict access with attribute access throughout.
-
-**Implementation Notes:**
-- Affects `structural_parser.py` (ManifestEntry + build_manifest) and `chunk_assembly.py` (assemble_chunks line_range access)
-- Search for `.get("start"` and `.get("end"` to find all access points
-- Tests that construct ManifestEntry dicts will need updating
-
----
-
-#### A2. Add structured logging
-
-**Priority:** Medium
-**Effort:** S-M
-**Impact:** No way to trace pipeline execution, diagnose issues, or measure stage timing. All output is `print()` to stdout.
-
-**Current State:**
-CLI commands use `print()` for progress. No logging framework. No way to control verbosity.
-
-**Recommendation:**
-Add Python `logging` throughout the pipeline. Each module gets its own logger (`logger = logging.getLogger(__name__)`). CLI configures root logger with `--verbose` (DEBUG), default (INFO), `--quiet` (WARNING). Log key metrics at each stage: page count, boundary count, chunk count, timing.
-
-**Implementation Notes:**
-- No new dependency — `logging` is stdlib
-- Replace `print()` calls in CLI with `logger.info()`
-- Add `logger.debug()` for detailed tracing (individual boundary detections, rule applications)
-- Add `--verbose` and `--quiet` flags to CLI
-
----
-
-#### A3. Move `extract_pages` out of `__init__.py`
+#### A2. Filter Pipeline Observability
 
 **Priority:** Low
 **Effort:** XS
-**Impact:** Minor — keeps `__init__.py` clean and makes the extraction stage a proper module.
+**Impact:** Faster debugging when filter passes produce unexpected results
 
 **Current State:**
-`extract_pages()` lives in `src/pipeline/__init__.py`. It's the only function there. CLI imports it via `from . import extract_pages`.
+`filter_boundaries()` logs total before/after counts but not per-pass counts. When 9,207 boundaries become 6,315, there's no way to see which of the 3 passes removed how many without adding debug code.
 
 **Recommendation:**
-Move to `src/pipeline/extraction.py`. Update imports in `cli.py`.
+Add per-pass logging at INFO level: `"Pass 0 (known_id): %d -> %d"`, `"Pass 1 (blank_before): %d -> %d"`, etc. Zero behavioral change, pure diagnostic improvement.
 
 **Implementation Notes:**
-- Trivial refactor, one function
-- Keep a re-export in `__init__.py` for backward compatibility if desired, or just update the two import sites
+- 4-5 additional `logger.info()` calls in `filter_boundaries()`
+- Already partially present (the final before/after log exists)
+- Could also track removed boundaries at DEBUG level for deeper investigation
 
 ---
 
-### Category 5: Developer Experience
+### Category 3: Developer Experience
 
-#### X1. Add mypy / pyright type checking
-
-**Priority:** Medium
-**Effort:** S
-**Impact:** Catches type errors at development time rather than runtime. The codebase already has type hints everywhere — just needs a checker.
-
-**Current State:**
-Type hints are present throughout but no type checker is configured. `typing.Any` is used in several places that could be tighter.
-
-**Recommendation:**
-Add `mypy` to dev dependencies. Create a minimal `mypy.ini` or `[tool.mypy]` section in `pyproject.toml`. Start with `--strict` disabled, fix any immediate errors, then tighten incrementally.
-
-**Implementation Notes:**
-- Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
-- Add `[tool.mypy]` section to `pyproject.toml`
-- The `Any` types on Qdrant client parameters should stay as `Any` (external dependency)
-- Run mypy in CI alongside pytest
-
----
-
-#### X2. Add multi-page test fixtures
+#### D1. Integration Test for End-to-End Pipeline
 
 **Priority:** High
-**Effort:** S
-**Impact:** Current test fixtures are all single-page. The most critical bug (D1, cross-page slicing) is completely untested because no fixture exercises multi-page behavior.
+**Effort:** M
+**Impact:** Catches cascade failures before they reach production; the L1/L2/L3 collapse was only discovered by running the real 1,948-page PDF manually
 
 **Current State:**
-`conftest.py` fixtures (`xj_sample_page_text`, `cj_sample_page_text`, `tm9_sample_page_text`) are single-page strings. Tests for `assemble_chunks` construct single-page inputs.
+349 unit tests cover individual modules thoroughly, but there is no integration test that runs the full pipeline (extract -> clean -> detect -> filter -> build -> assemble -> validate) on a representative multi-page document. The cascade failure was invisible to unit tests because each module works correctly in isolation — the problem only manifests when they interact with real-world data.
 
 **Recommendation:**
-Add multi-page fixtures (2-3 pages) for at least one manual profile. Create an end-to-end test that processes multiple pages through `detect_boundaries` → `build_manifest` → `assemble_chunks` and verifies chunk text is extracted from the correct page.
+Create a small (5-10 page) synthetic test document with known structure: 2-3 L1 groups, 3-4 L2 sections, 5+ L3 procedures, 2+ L4 sub-procedures, including digit-starting lines that should NOT become L1 boundaries. Run the full pipeline in a pytest integration test and assert boundary counts per level, chunk count range, zero QA errors, and specific chunk IDs present. Mark as `@pytest.mark.integration`.
 
 **Implementation Notes:**
-- This test would have caught bug D1 immediately
-- Keep fixtures minimal (2-3 pages with 1-2 boundaries each)
-- Can be added to existing test files or as a new `test_multipage.py`
+- Synthetic fixture avoids test dependency on the 50MB real manual
+- Assert both positive (expected boundaries found) and negative (no false L1 from digit-starting lines)
+- Could reuse existing test fixtures, assembled into a multi-page document
+- Key assertion: L3 procedure boundaries are detected (the thing that broke)
 
 ---
 
-#### X3. Add CI pipeline (GitHub Actions)
-
-**Priority:** Low
-**Effort:** S
-**Impact:** Automated test runs on push/PR. Currently tests only run manually.
-
-**Current State:**
-No `.github/workflows/` directory. No CI configuration.
-
-**Recommendation:**
-Add a GitHub Actions workflow that runs `pytest` on push to main and on PRs. Include Python 3.10, 3.11, 3.12, 3.13 matrix. Add mypy check if X1 is implemented.
-
-**Implementation Notes:**
-- Standard Python CI workflow template
-- Keep it simple: install deps, run tests, report
-- Consider adding coverage reporting via codecov or similar
-
----
-
-### Category 6: New Capabilities
-
-#### N1. Offline QA mode
+#### D2. Production Profile Regression Test
 
 **Priority:** Medium
-**Effort:** S-M
-**Impact:** The `pipeline qa` command currently requires a running Qdrant instance. Most validation checks (orphaned steps, split safety, size outliers, metadata, duplicates) don't need vectors at all.
+**Effort:** S
+**Impact:** Prevents accidental profile regressions; catches regex typos, missing fields, invalid patterns
 
 **Current State:**
-`cmd_qa()` immediately prints an error and returns 1. The validation suite (`run_validation_suite`) works on in-memory chunks — it doesn't need Qdrant.
+No automated test validates that `profiles/xj-1999.yaml` loads correctly, passes schema validation, compiles all regex patterns, and has internally consistent configuration. A typo in a regex would only be caught by a manual pipeline run.
 
 **Recommendation:**
-Add `--chunks` flag to `pipeline qa` that loads chunks from JSONL (per Q1). Run `run_validation_suite` against loaded chunks + profile. Only the cross-reference resolution step needs Qdrant.
+Add a pytest test that loads the production profile, validates it, compiles all regex patterns, and asserts basic invariants (known_ids count > 30, L1 has `require_known_id: true`, L3 pattern contains procedure keywords). Mark as `@pytest.mark.integration`.
 
 **Implementation Notes:**
-- Depends on Q1 (chunk persistence) for the input format
-- 6 of 7 QA checks are pure functions on chunks + profile
-- `check_cross_ref_validity` works on chunk IDs, not vector search — also offline-capable
+- Lightweight test — no PDF processing, just profile loading and validation
+- Should be added alongside the production profile in Phase 2
+- Catches most common mistakes (typos, missing fields, invalid regex)
 
 ---
 
-#### N2. Retrieval REPL / chatbot interface
+#### D3. Validation Report Summarization
 
 **Priority:** Low
+**Effort:** XS
+**Impact:** Makes CLI output actionable when there are thousands of issues
+
+**Current State:**
+`cmd_validate()` in `cli.py:342-345` logs every individual issue. With 2,379 warnings, the output is a wall of repetitive text. The important signal (113 cross-ref errors, all the same type) is buried.
+
+**Recommendation:**
+Add a summary grouping at the end of validation output: group issues by `(check, severity)`, show count and a single example for each group. Keep full detail available via `--verbose`.
+
+**Implementation Notes:**
+- Change in `cli.py` only (formatting, not validation logic)
+- Low effort but meaningful UX improvement for iterative tuning
+
+---
+
+### Category 4: New Capabilities
+
+#### N1. Profile Bootstrapping from PDF
+
+**Priority:** Medium
 **Effort:** L
-**Impact:** The retrieval module is fully implemented but there's no user-facing interface. The only way to query is via Python API.
+**Impact:** Reduces time to onboard a new manual from hours to minutes
 
 **Current State:**
-`analyze_query()` and `retrieve()` exist and work, but no CLI command exposes them interactively.
+`cmd_bootstrap_profile()` exists as a stub (`logger.error("bootstrap-profile is not yet implemented.")`). Onboarding a new manual requires manually examining the PDF, identifying hierarchy patterns, building the known_ids list, and tuning regex patterns.
 
 **Recommendation:**
-Add `pipeline query --profile ... --collection ...` command that starts a REPL loop. Accept natural language queries, run through `analyze_query` → `retrieve`, display results with metadata. Optional: format safety callouts prominently.
+Implement LLM-assisted profile bootstrapping: extract sample pages (table of contents, first page of each group), send to an LLM with a structured prompt and the production XJ profile as a few-shot example, generate a draft profile YAML. Not in scope for current release but would dramatically reduce onboarding friction for future manuals.
 
 **Implementation Notes:**
-- Requires running Qdrant and Ollama
-- Could start as a simple `while True: input()` loop
-- Consider later: Streamlit or Gradio UI for non-technical users
-- Lower priority than correctness/reliability fixes
+- Deferred — the production XJ profile serves as the "golden example" template
+- Could use existing `extract_pages()` for PDF sampling
+- Consider auto-detecting `skip_sections` based on content analysis
+
+---
+
+#### N2. Chunk Quality Metrics Persistence
+
+**Priority:** Low
+**Effort:** S
+**Impact:** Enables quantitative comparison across pipeline runs and profile iterations
+
+**Current State:**
+Pipeline metrics (chunk count, boundary counts, undersized percentage, QA pass/fail) are only available as log output. No way to track improvement across iterations or compare profiles quantitatively.
+
+**Recommendation:**
+Save run metrics to a JSON file alongside the chunks JSONL output: timestamp, profile path, boundary counts by level, chunk count, size distribution (min/median/mean/max/p10/p90), QA error/warning counts by check type. Enables `diff`-based comparison.
+
+**Implementation Notes:**
+- Low priority for current release
+- Simple JSON dump at end of `cmd_process()` and `cmd_validate()`
 
 ---
 
 ## Quick Wins
 
-Items that can be completed in under an hour each, with outsized impact:
+| # | Recommendation | Effort | Impact |
+|---|---------------|--------|--------|
+| Q3 | Cross-ref namespace qualification | XS | Eliminates 113 errors (one-line fix) |
+| A2 | Per-pass filter logging | XS | Better debugging during tuning |
+| D3 | Validation report summarization | XS | Actionable CLI output |
 
-1. **R4** — Fix `bootstrap-profile` to return error (XS effort, eliminates user confusion)
-2. **D2** — Add `manual_id`/`level1_id` to metadata dict (S effort, fixes QA false errors)
-3. **D3** — Fix `compose_embedding_input` to use metadata header (S effort, fixes embedding quality)
-4. **R3** — Fix safety callout regex to use compiled pattern (S effort, fixes matching behavior)
-5. **R1** — Add timeout to `requests.post()` (S effort, prevents hanging)
-6. **R2** — Replace bare `except` with `warnings.warn()` (S effort, surfaces failures)
+These three can be completed in under an hour combined and immediately improve daily workflow.
 
 ---
 
 ## Strategic Initiatives
 
-Changes requiring broader planning and multi-module coordination:
+| # | Recommendation | Effort | Impact |
+|---|---------------|--------|--------|
+| Q1+Q2+Q5 | Mandatory filter + closed vocabulary + production profile | S+S+M | Fixes the core cascade failure |
+| D1 | Integration test for end-to-end pipeline | M | Prevents future cascade regressions |
+| N1 | Profile bootstrapping from PDF | L | Unlocks multi-manual scaling |
 
-1. **D1** — Cross-page coordinate model fix (touches parser, manifest, assembler, tests)
-2. **Q1 + N1** — Chunk persistence + offline QA (new module + CLI changes)
-3. **A2** — Structured logging across all modules
-4. **Q2** — Content-type detection (profile config integration + classification logic)
+These require phased implementation and are covered in the Implementation Plan.
 
 ---
 
 ## Not Recommended
 
-Items considered but rejected:
-
-| Item | Rationale |
+| Idea | Rationale |
 |------|-----------|
-| **Add `jsonschema` as runtime dependency** | The JSON Schema file is documentation. Runtime validation is handled by Python `validate_profile()`. Adding a schema validator dependency for what's already covered in code adds complexity without benefit. |
-| **Replace dataclasses with Pydantic** | The project deliberately chose dataclasses to stay dependency-light. The typed dataclass approach works well. Pydantic would be over-engineering for this use case. |
-| **Async pipeline execution** | The pipeline is I/O-bound only at embedding generation (Ollama HTTP). Async adds complexity; the simpler fix is batched embedding requests within the existing sync model. |
-| **LangChain / LlamaIndex integration** | The pipeline's value is its domain-specific chunking rules (R1-R8) that generic frameworks don't support. The retrieval module is already purpose-built. |
-| **Real BPE tokenizer (tiktoken)** | Documented tradeoff in `count_tokens()` is sound. Word count is sufficient for chunking decisions. The ~30% overestimate is safe for RAG. Only revisit if strict context window limits become relevant. |
+| ML-based heading classification | Over-engineering for current corpus. Chrysler service manual headings follow a deterministic, closed vocabulary. Regex with the right patterns is simpler, faster, and debuggable. Revisit if onboarding non-Chrysler manuals with unpredictable heading structures. |
+| Real tokenizer (tiktoken) for size checks | Word-count approximation is adequate for merge/split decisions. The difference between 3 words being 3 or 4 BPE tokens doesn't change that it's too small for RAG retrieval. |
+| Redesigning the disambiguation algorithm | Q1 (known_ids filter) eliminates the input that causes the cascade. The algorithm works correctly when its inputs are clean. Redesigning it is unnecessary complexity. |
+| Switching from dataclasses to Pydantic | 349 tests validate the current type system. Migration cost exceeds benefit. The codebase is consistent and working. |
+| Automatic pattern tuning | The root cause was a too-loose pattern combined with no validation gate. Manual profile authoring with mandatory known_ids is the right level of control for a corpus this small. |
 
 ---
 
 *Recommendations generated by Claude on 2026-02-16*
-*Source: REVIEW.md architectural audit + full codebase deep analysis*
+*Baseline: 2,408 chunks from 1,948-page XJ manual (post-Phase 1-3 remediation)*

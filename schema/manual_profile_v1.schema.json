@@ -147,6 +147,28 @@
                   }
                 },
                 "description": "Known section IDs and titles for validation."
+              },
+              "min_gap_lines": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Minimum number of lines between the previous boundary and this one for it to be accepted. 0 = disabled."
+              },
+              "min_content_words": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Minimum number of content words required after this boundary for it to be accepted. 0 = disabled."
+              },
+              "require_blank_before": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether a blank line must precede this boundary for it to be accepted."
+              },
+              "require_known_id": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true and known_ids is non-empty, boundaries with IDs not in the known set are filtered out. Boundaries with no extracted ID are also rejected."
               }
             }
           }
@@ -303,6 +325,12 @@
           "description": "Markets covered by this manual."
         }
       }
+    },
+    "skip_sections": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Level-1 section IDs to exclude from chunk assembly (e.g., ['8W'] to skip wiring diagrams)."
     }
   }
 }

@@ -1,610 +1,526 @@
-# Implementation Plan: REVIEW.md Remediation
+# Implementation Plan: Output Quality — Phase 2
 
 **Generated:** 2026-02-16
-**Completed:** 2026-02-16
-**Based On:** RECOMMENDATIONS.md (derived from REVIEW.md architectural audit + codebase analysis)
-**Supersedes:** Previous IMPLEMENTATION_PLAN.md (2026-02-15, completed — schema stability/documentation)
-**Total Phases:** 4 (all complete)
-**Final Test Count:** 349 tests passing
+**Based On:** RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md
+**Supersedes:** Previous IMPLEMENTATION_PLAN.md (Phase 1-3 remediation — complete, 349 tests passing)
+**Total Phases:** 4
+**Estimated Total Effort:** ~100K tokens
 
 ---
 
 ## Plan Overview
 
-This plan addresses the remediation roadmap from the architectural review (REVIEW.md) plus additional findings from deep codebase analysis. **All 4 phases are now complete — 349 tests passing as of 2026-02-16.**
+This plan addresses the four remaining output quality issues identified by running the 1,948-page XJ service manual through the pipeline. The previous three-phase implementation (skip list, metadata enrichment, boundary filtering, cross-entry merge) is complete with 349 tests passing. This plan builds on that foundation to reach QA-passing output quality.
 
-The strategy was: **fix data integrity first** (Phase 1), **then reliability** (Phase 2), **then output quality and persistence** (Phase 3), **then developer experience** (Phase 4). Each phase left the codebase in a working state with all tests passing.
+**Strategy:** Phase 1 adds the mandatory known_ids filter (schema + code). Phase 2 creates the production XJ profile with complete configuration. Phase 3 fixes the cross-reference namespace mismatch. Phase 4 validates end-to-end and tunes iteratively. Phases 1 and 3 are independent and can run in parallel. Phase 2 depends on Phase 1. Phase 4 depends on all prior phases.
+
+**Validation approach:** After Phase 4, re-run the full XJ pipeline and confirm:
+- L1 boundaries drop from ~2,748 to ~55
+- L3 boundaries increase from 82 to 500+
+- Cross-ref errors drop from 113 to 0
+- known_ids warnings drop from 1,716 to <20
+- QA passed: True
 
 ### Phase Summary Table
 
 | Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies |
 |-------|------------|------------------|-------------|--------------|
-| 1 | Data Integrity | Cross-page slicing fix, metadata alignment, embedding contract fix | ~60K | None |
-| 2 | Reliability | HTTP timeouts, error surfacing, regex fix, deterministic IDs, bootstrap-profile | ~40K | None |
-| 3 | Output & Persistence | JSONL chunk export, manifest export, offline QA, content-type detection | ~60K | Phase 1 (metadata alignment) |
-| 4 | Developer Experience | Structured logging, typed ranges, multi-page tests, mypy | ~40K | None |
+| 1 | Mandatory known_ids filter | Schema field, dataclass field, filter pass, 5 tests | ~25K | None |
+| 2 | Production XJ profile | Complete profile YAML, L2/L3/L4 patterns, profile regression test | ~30K | Phase 1 |
+| 3 | Cross-ref namespace fix | Qualify refs, downgrade skip_section refs, 5 tests | ~20K | None |
+| 4 | End-to-end validation | Pipeline run, metric comparison, iterative tuning | ~25K | Phases 1-3 |
 
 ---
 
-## Phase 1: Data Integrity
+## Phase 1: Mandatory known_ids Filter
 
-**Estimated Effort:** ~60,000 tokens (including testing/fixes)
+**Estimated Effort:** ~25,000 tokens (including testing/fixes)
 **Dependencies:** None
-**Parallelizable:** 1.1 is independent; 1.2 and 1.3 can run in parallel after 1.1
+**Parallelizable:** Yes — can run concurrently with Phase 3
 
 ### Goals
-
-- Fix the cross-page chunk slicing coordinate model (REVIEW #1 — Critical)
-- Align metadata contract between assembler, QA, and embeddings (REVIEW #2 — Must Fix)
-- Fix embedding composition to use metadata header (REVIEW #3 — Must Fix)
+- Add `require_known_id` support to the profile schema, dataclass, and boundary filter
+- When enabled, L1 boundaries with unrecognized IDs are dropped during `filter_boundaries()`
+- Zero behavior change for existing profiles and tests
 
 ### Work Items
 
-#### 1.1 Fix cross-page coordinate model
+#### 1.1 Schema: Add `require_known_id` Property
 
-**Recommendation Ref:** D1
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify — `detect_boundaries()`, `build_manifest()`)
-- `tests/test_structural_parser.py` (modify — update line_number assertions, add multi-page tests)
-- `tests/test_chunk_assembly.py` (modify — add multi-page assembly test)
-- `tests/conftest.py` (modify — add multi-page fixture)
+**Recommendation Ref:** Q1
+**Files Affected:** `schema/manual_profile_v1.schema.json`
 
 **Description:**
-`detect_boundaries()` records `line_number` as the offset within the current page, but `assemble_chunks()` joins all pages and treats `line_number` as a global offset. For any manual with more than one page, chunk text extraction is wrong.
-
-Fix: track a running `global_line_offset` in `detect_boundaries()`. Before iterating each page's lines, compute `global_offset = sum(len(pages[p].split("\n")) for p in range(page_idx))` (or accumulate incrementally). Store `boundary.line_number = global_offset + line_idx`.
-
-**Tasks:**
-1. [x] Add multi-page test fixtures to `conftest.py` — at least 2 pages with boundaries on each page
-2. [x] Write failing test: process 2 pages through `detect_boundaries` → `build_manifest` → `assemble_chunks`, assert chunk text matches expected content from the correct page
-3. [x] Fix `detect_boundaries()` in `structural_parser.py` to use global line offsets
-4. [x] Update `build_manifest()` if needed (it passes through boundary.line_number — should work once boundaries are correct)
-5. [x] Update existing tests in `test_structural_parser.py` that assert per-page line numbers — these should now assert global offsets
-6. [x] Run full test suite — all 250+ tests must pass
+Add `require_known_id` boolean property to the hierarchy level item in the JSON Schema, with `default: false`.
 
 **Acceptance Criteria:**
-- [x] Multi-page test demonstrates correct chunk text extraction from page 2+
-- [x] Boundary line numbers are global (absolute) offsets, not per-page
-- [x] `assemble_chunks()` produces correct text for multi-page manuals without any changes to its own code
-- [x] All existing tests pass (with updated line number expectations)
+- [ ] Property appears in hierarchy level item properties
+- [ ] Default is `false`
+- [ ] Description explains behavior
+- [ ] Existing profiles validate without changes
 
 ---
 
-#### 1.2 Align metadata contract
+#### 1.2 Dataclass: Add Field to `HierarchyLevel`
 
-**Recommendation Ref:** D2
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — metadata dict in `assemble_chunks()`)
-- `tests/test_chunk_assembly.py` (modify — assert new metadata fields)
-- `tests/test_qa.py` (modify — metadata_completeness tests should now pass cleanly)
+**Recommendation Ref:** Q1
+**Files Affected:** `src/pipeline/profile.py`
 
 **Description:**
-Add `manual_id`, `level1_id`, and `procedure_name` to the chunk metadata dict in `assemble_chunks()`. Currently QA's `check_metadata_completeness` always flags missing `manual_id` and `level1_id`, and the SQLite index writes empty strings for `procedure_name` and `level1_id`.
-
-**Tasks:**
-1. [x] Add `"manual_id": manifest.manual_id` to the metadata dict at `chunk_assembly.py:682`
-2. [x] Extract `level1_id` from `entry.hierarchy_path[0]` if available, else from chunk_id parsing. Add to metadata.
-3. [x] Add `"procedure_name": entry.title` to metadata
-4. [x] Update `test_chunk_assembly.py` tests that assert metadata keys
-5. [x] Verify `test_qa.py` metadata_completeness tests pass without false errors
-6. [x] Verify `embeddings.py` SQLite index now gets real values for `level1_id` and `procedure_name`
+Add `require_known_id: bool = False` field to the `HierarchyLevel` dataclass. Update the hierarchy parsing in `load_profile()` to read this field from the YAML dict.
 
 **Acceptance Criteria:**
-- [x] `chunk.metadata` contains `manual_id`, `level1_id`, `content_type`, `procedure_name`
-- [x] QA `check_metadata_completeness` passes for correctly formed chunks
-- [x] SQLite `procedure_lookup` gets meaningful data
-- [x] All tests pass
+- [ ] Field exists on `HierarchyLevel` with default `False`
+- [ ] `load_profile()` reads `require_known_id` from YAML
+- [ ] Existing profiles load without changes (field defaults to `False`)
 
 ---
 
-#### 1.3 Fix embedding composition contract
+#### 1.3 Parser: Enforce in `filter_boundaries()`
 
-**Recommendation Ref:** D3
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify — `compose_embedding_input()`)
-- `tests/test_embeddings.py` (modify — update composition tests)
+**Recommendation Ref:** Q1
+**Files Affected:** `src/pipeline/structural_parser.py`
 
 **Description:**
-`compose_embedding_input()` splits `chunk.text` on the first `\n\n` thinking the header is baked into the text. It's not — the header is in `chunk.metadata["hierarchical_header"]`. The function should use the metadata header + body text.
+Add Pass 0 to `filter_boundaries()` — before the existing blank-line, gap, and content-words passes. For levels where `require_known_id` is `True` and `known_ids` is non-empty, reject any boundary whose extracted ID is not in the known set. Boundaries with `id=None` are also rejected.
 
-**Tasks:**
-1. [x] Rewrite `compose_embedding_input()` to read header from `chunk.metadata["hierarchical_header"]`
-2. [x] Build embedding text as `f"{header}\n\n{get_first_n_words(chunk.text, 150)}"`
-3. [x] Remove the `\n\n` split logic (dead code after fix)
-4. [x] Handle missing `hierarchical_header` key gracefully (fallback to text-only)
-5. [x] Update tests in `test_embeddings.py` — construct chunks with metadata header and verify output
-6. [x] Run full test suite
+```python
+# --- Pass 0: require_known_id ---
+known_id_sets: dict[int, set[str]] = {}
+for h in profile.hierarchy:
+    if h.require_known_id and h.known_ids:
+        known_id_sets[h.level] = {entry["id"] for entry in h.known_ids}
+
+if known_id_sets:
+    filtered = []
+    for b in boundaries:
+        if b.level in known_id_sets:
+            if b.id is None or b.id not in known_id_sets[b.level]:
+                continue  # rejected: ID not in known set
+        filtered.append(b)
+    boundaries = filtered
+```
 
 **Acceptance Criteria:**
-- [x] Embedding input includes hierarchical context (manual > group > section > procedure)
-- [x] Body text is truncated to 150 words
-- [x] Old `\n\n` split logic is removed
-- [x] Graceful fallback when metadata key is missing
-- [x] All tests pass
+- [ ] Pass 0 runs before existing passes
+- [ ] Only affects levels with `require_known_id: True` AND non-empty `known_ids`
+- [ ] Boundaries at unaffected levels pass through untouched
+- [ ] `id=None` boundaries are rejected when filter is active
+
+---
+
+#### 1.4 Tests
+
+**Recommendation Ref:** Q1
+**Files Affected:** `tests/test_structural_parser.py`
+
+**Description:**
+Add `TestRequireKnownId` test class with 5 tests:
+
+1. `test_require_known_id_rejects_unknown` — profile with `require_known_id: true` and known_ids `["7", "9"]`. Boundaries with IDs `"7"`, `"9"`, `"42"`, `"1999"`. Assert only `"7"` and `"9"` survive.
+2. `test_require_known_id_false_passes_all` — same boundaries, `require_known_id: false`. All pass.
+3. `test_require_known_id_empty_known_ids_passes_all` — `require_known_id: true`, empty `known_ids`. All pass (guard clause).
+4. `test_require_known_id_none_id_rejected` — boundary with `id=None`, `require_known_id: true`. Rejected.
+5. `test_require_known_id_only_affects_configured_level` — L1 has `require_known_id: true`, L2 does not. L2 boundaries pass through.
+
+**Acceptance Criteria:**
+- [ ] All 5 new tests pass
+- [ ] All 349 existing tests still pass
 
 ---
 
 ### Phase 1 Testing Requirements
-
-- [x] Multi-page boundary/chunking test catches the coordinate bug and passes after fix
-- [x] Metadata completeness QA check passes for well-formed chunks
-- [x] Embedding composition tests verify header comes from metadata
-- [x] All 250+ existing tests pass
-- [x] New tests added: ~10-15
+- [ ] Schema validates profiles with the new field
+- [ ] Existing test suite passes (349 tests) — `require_known_id` defaults to `false`
+- [ ] 5 new unit tests pass
+- [ ] `pytest -v --tb=short` — all green
 
 ### Phase 1 Completion Checklist
-
-- [x] All work items complete
-- [x] All tests passing (`pytest -v --tb=short`)
-- [x] LEARNINGS.md updated with coordinate model decision
-- [x] No regressions introduced
+- [ ] All work items complete (1.1-1.4)
+- [ ] Tests passing (354 total)
+- [ ] No regressions introduced
 
 ---
 
-## Phase 2: Reliability & Error Handling
+## Phase 2: Production XJ Profile
 
-**Estimated Effort:** ~40,000 tokens (including testing/fixes)
-**Dependencies:** None (can run in parallel with Phase 1)
-**Parallelizable:** All work items are independent
+**Estimated Effort:** ~30,000 tokens (including testing/fixes)
+**Dependencies:** Phase 1 (need `require_known_id` field)
+**Parallelizable:** No — sequential with Phase 1
 
 ### Goals
-
-- Add timeout and retry for embedding HTTP calls (REVIEW #6)
-- Surface retrieval failures (REVIEW #7)
-- Fix safety callout regex inconsistency (REVIEW #8)
-- Make bootstrap-profile fail fast (REVIEW #4)
-- Use deterministic Qdrant point IDs (REVIEW #5)
+- Create `profiles/xj-1999.yaml` with complete known_ids, tuned patterns, and relaxed L3 filters
+- Keep test fixture `tests/fixtures/xj_1999_profile.yaml` unchanged
+- Add profile regression test
 
 ### Work Items
 
-#### 2.1 Add HTTP timeout and retry for embedding calls
+#### 2.1 Create Production Profile
 
-**Recommendation Ref:** R1
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify — `generate_embedding()`)
-- `tests/test_embeddings.py` (modify — add timeout and retry tests)
+**Recommendation Ref:** Q2, Q5
+**Files Affected:** `profiles/xj-1999.yaml` (new)
 
 **Description:**
-Add `timeout=30` to `requests.post()`. Add retry logic (3 attempts with exponential backoff) for transient errors.
+Copy from `tests/fixtures/xj_1999_profile.yaml` and apply all changes:
 
-**Tasks:**
-1. [x] Add `timeout=30` parameter to `requests.post()` at `embeddings.py:79`
-2. [x] Wrap the request in a retry loop: 3 attempts, `time.sleep(2 ** attempt)` between failures
-3. [x] Catch `requests.exceptions.ConnectionError`, `requests.exceptions.Timeout`, and 5xx responses
-4. [x] Raise `RuntimeError(f"Embedding generation failed after 3 attempts: {last_error}")` on exhaustion
-5. [x] Add test: mock `requests.post` to raise `ConnectionError` once then succeed — verify retry works
-6. [x] Add test: mock `requests.post` to always fail — verify RuntimeError after 3 attempts
+1. **Complete known_ids list** (~39 groups from XJ Tab Locator):
+   ```yaml
+   known_ids:
+     - { id: "IN", title: "Introduction" }
+     - { id: "0", title: "Lubrication and Maintenance" }
+     - { id: "2", title: "Suspension" }
+     - { id: "3", title: "Differential and Driveline" }
+     - { id: "5", title: "Brakes" }
+     - { id: "6", title: "Clutch" }
+     - { id: "7", title: "Cooling System" }
+     - { id: "8A", title: "Battery" }
+     - { id: "8B", title: "Starting System" }
+     - { id: "8C", title: "Charging System" }
+     - { id: "8D", title: "Ignition System" }
+     - { id: "8E", title: "Instrument Panel Systems" }
+     - { id: "8F", title: "Audio Systems" }
+     - { id: "8G", title: "Horn Systems" }
+     - { id: "8H", title: "Vehicle Speed Control System" }
+     - { id: "8J", title: "Turn Signal and Hazard Warning Systems" }
+     - { id: "8K", title: "Wiper and Washer Systems" }
+     - { id: "8L", title: "Lamps" }
+     - { id: "8M", title: "Passive Restraint Systems" }
+     - { id: "8N", title: "Electrically Heated Systems" }
+     - { id: "8O", title: "Power Distribution Systems" }
+     - { id: "8P", title: "Power Lock Systems" }
+     - { id: "8Q", title: "Vehicle Theft/Security Systems" }
+     - { id: "8R", title: "Power Seats Systems" }
+     - { id: "8S", title: "Power Window Systems" }
+     - { id: "8T", title: "Power Mirror Systems" }
+     - { id: "8U", title: "Chime/Buzzer Warning Systems" }
+     - { id: "8V", title: "Overhead Console Systems" }
+     - { id: "8W", title: "Wiring Diagrams" }
+     - { id: "9", title: "Engine" }
+     - { id: "11", title: "Exhaust System and Intake Manifold" }
+     - { id: "13", title: "Frame and Bumpers" }
+     - { id: "14", title: "Fuel System" }
+     - { id: "19", title: "Steering" }
+     - { id: "21", title: "Transmission and Transfer Case" }
+     - { id: "22", title: "Tires and Wheels" }
+     - { id: "23", title: "Body" }
+     - { id: "24", title: "Heating and Air Conditioning" }
+     - { id: "25", title: "Emission Control Systems" }
+   ```
+
+2. **Set `require_known_id: true`** on L1 hierarchy level.
+
+3. **L2 pattern — add negative lookahead** for procedure keywords:
+   ```yaml
+   id_pattern: "^(?!REMOVAL|INSTALLATION|REMOVAL AND INSTALLATION|DIAGNOSIS|DIAGNOSIS AND TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY|ASSEMBLY|DISASSEMBLY AND ASSEMBLY|CLEANING|INSPECTION|CLEANING AND INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|TESTING|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
+   ```
+
+4. **L3 pattern — closed vocabulary**:
+   ```yaml
+   title_pattern: "^(REMOVAL AND INSTALLATION|REMOVAL|INSTALLATION|DIAGNOSIS AND TESTING|DIAGNOSIS|TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY AND ASSEMBLY|DISASSEMBLY|ASSEMBLY|CLEANING AND INSPECTION|CLEANING|INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)$"
+   min_gap_lines: 0
+   min_content_words: 3
+   require_blank_before: false
+   ```
+
+5. **L4 pattern — broader component matching**:
+   ```yaml
+   title_pattern: "^([A-Z][A-Z][A-Z \\-/]{1,}(?:\\([A-Z0-9\\. ]+\\))?)$"
+   min_content_words: 3
+   ```
 
 **Acceptance Criteria:**
-- [x] `requests.post()` has `timeout=30`
-- [x] Transient failures are retried up to 3 times
-- [x] Permanent failures raise `RuntimeError` with clear message
-- [x] All tests pass
+- [ ] Profile passes schema validation
+- [ ] All regex patterns compile without error
+- [ ] known_ids count >= 35
+- [ ] `require_known_id: true` is set on L1
 
 ---
 
-#### 2.2 Surface retrieval failures
+#### 2.2 Add Profile Regression Test
 
-**Recommendation Ref:** R2
-**Files Affected:**
-- `src/pipeline/retrieval.py` (modify — `resolve_cross_references()`)
-- `tests/test_retrieval.py` (modify — add error handling tests)
+**Recommendation Ref:** D2
+**Files Affected:** `tests/test_profile.py`
 
 **Description:**
-Replace bare `except sqlite3.Error: pass` with `warnings.warn()` so failures are visible. Add `retrieval_warnings: list[str]` field to `RetrievalResponse`.
-
-**Tasks:**
-1. [x] Add `import warnings` to `retrieval.py`
-2. [x] Replace `except sqlite3.Error: pass` with `except sqlite3.Error as e: warnings.warn(f"Cross-reference resolution failed: {e}")`
-3. [x] Add `retrieval_warnings: list[str] = field(default_factory=list)` to `RetrievalResponse`
-4. [x] Capture warnings in `retrieve()` and add to response
-5. [x] Add test: mock SQLite to raise `sqlite3.OperationalError`, verify warning is issued and partial results returned
-6. [x] Document placeholder results in `enrich_with_parent()` and `enrich_with_siblings()` with clear comments
+Add an integration test that loads `profiles/xj-1999.yaml`, validates it, compiles all regex patterns, and asserts basic invariants.
 
 **Acceptance Criteria:**
-- [x] SQLite errors produce `warnings.warn()` rather than silent pass
-- [x] `RetrievalResponse` carries warning messages
-- [x] Partial results still returned on degraded path
-- [x] All tests pass
-
----
-
-#### 2.3 Fix safety callout regex handling
-
-**Recommendation Ref:** R3
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — `detect_safety_callouts()`)
-- `tests/test_chunk_assembly.py` (modify — add mixed-case pattern test)
-
-**Description:**
-`detect_safety_callouts()` compiles patterns with flags at line 141 but then uses `re.search(sc.pattern, stripped)` (the raw string) at line 145 instead of the compiled `pat`. The inner loop at line 157 has the same issue.
-
-**Tasks:**
-1. [x] Change `re.search(sc.pattern, stripped)` at line 145 to `pat.search(stripped)`
-2. [x] Pre-compile inner loop patterns: build a list of compiled safety patterns before the line loop, and use them at line 157 instead of `re.search(sc2.pattern, next_stripped)`
-3. [x] Add test: create a profile with a case-insensitive safety pattern (lowercase "warning"), verify it matches uppercase text
-4. [x] Run full test suite
-
-**Acceptance Criteria:**
-- [x] All pattern matching in `detect_safety_callouts()` uses compiled regex objects
-- [x] No raw `re.search(sc.pattern, ...)` calls remain
-- [x] Mixed-case test passes
-- [x] All existing tests pass
-
----
-
-#### 2.4 Make bootstrap-profile fail fast
-
-**Recommendation Ref:** R4
-**Files Affected:**
-- `src/pipeline/cli.py` (modify — `cmd_bootstrap_profile()`)
-- `tests/test_cli.py` (modify — update expected exit code)
-
-**Description:**
-`cmd_bootstrap_profile()` has a TODO comment and `return 0`. Should print an error and return 1.
-
-**Tasks:**
-1. [x] Replace TODO block with: `print("Error: bootstrap-profile is not yet implemented.", file=sys.stderr)` + `return 1`
-2. [x] Update test in `test_cli.py` that checks bootstrap-profile behavior to expect exit code 1
-
-**Acceptance Criteria:**
-- [x] `pipeline bootstrap-profile` returns exit code 1
-- [x] Error message clearly states the feature is not implemented
-- [x] All tests pass
-
----
-
-#### 2.5 Use deterministic Qdrant point IDs
-
-**Recommendation Ref:** R5
-**Files Affected:**
-- `src/pipeline/embeddings.py` (modify — `index_chunks()`)
-- `tests/test_embeddings.py` (modify — update ID assertions)
-
-**Description:**
-Replace `id=i` with deterministic UUID5 derived from `chunk_id`.
-
-**Tasks:**
-1. [x] Add `import uuid` to `embeddings.py`
-2. [x] Change `id=i` at line 131 to `id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))`
-3. [x] Update tests that assert point IDs
-4. [x] Add test: verify same chunk_id always produces same point ID
-5. [x] Add test: verify different chunk_ids produce different point IDs
-
-**Acceptance Criteria:**
-- [x] Point IDs are deterministic UUIDs derived from chunk_id
-- [x] Re-indexing the same chunks produces the same point IDs (idempotent)
-- [x] Different manuals don't collide
-- [x] All tests pass
+- [ ] Production profile loads successfully
+- [ ] Profile passes `validate_profile()` with no errors
+- [ ] All regex patterns compile
+- [ ] known_ids count >= 35
+- [ ] L1 has `require_known_id: True`
+- [ ] L3 title_pattern contains "REMOVAL"
 
 ---
 
 ### Phase 2 Testing Requirements
-
-- [x] HTTP timeout/retry behavior tested with mocks
-- [x] SQLite error surfacing tested
-- [x] Regex compilation verified with case-sensitivity test
-- [x] Bootstrap-profile exit code tested
-- [x] Deterministic ID generation tested
-- [x] All 250+ existing tests pass
-- [x] New tests added: ~10-12
+- [ ] Production profile loads and validates
+- [ ] Regression test passes
+- [ ] All 354+ existing tests still pass
+- [ ] Profile is ready for end-to-end validation in Phase 4
 
 ### Phase 2 Completion Checklist
-
-- [x] All work items complete
-- [x] All tests passing (`pytest -v --tb=short`)
-- [x] No regressions introduced
+- [ ] `profiles/xj-1999.yaml` created
+- [ ] Profile regression test added
+- [ ] All tests passing
+- [ ] No regressions introduced
 
 ---
 
-## Phase 3: Output & Persistence
+## Phase 3: Cross-Reference Namespace Fix
 
-**Estimated Effort:** ~60,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (metadata alignment — chunks need correct metadata before persisting)
-**Parallelizable:** 3.1-3.2 are sequential; 3.3 depends on 3.1; 3.4 is independent
+**Estimated Effort:** ~20,000 tokens (including testing/fixes)
+**Dependencies:** None — independent of Phases 1 and 2
+**Parallelizable:** Yes — can run concurrently with Phase 1
 
 ### Goals
-
-- Add chunk and manifest persistence (JSONL/JSON export and import)
-- Enable offline QA (run validation without Qdrant)
-- Implement content-type detection using profile configuration
-- Implement functional R5 (table integrity) and R8 (figure continuity)
+- Fix the 100% cross-reference validation failure caused by bare group numbers
+- Downgrade references to skipped sections from error to warning
+- Maintain backward compatibility
 
 ### Work Items
 
-#### 3.1 Add chunk persistence (JSONL export/import)
-
-**Recommendation Ref:** Q1
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — add `save_chunks()`, `load_chunks()`)
-- `tests/test_chunk_assembly.py` (modify — add persistence tests)
-- `src/pipeline/cli.py` (modify — add `--output-dir` to `process` command)
-
-**Description:**
-Add functions to serialize chunks to JSONL and deserialize them back. Each line is a JSON object with `chunk_id`, `manual_id`, `text`, and `metadata`. Add `--output-dir` flag to `pipeline process`.
-
-**Tasks:**
-1. [x] Add `save_chunks(chunks: list[Chunk], output_path: Path) -> None` — writes one JSON line per chunk
-2. [x] Add `load_chunks(input_path: Path) -> list[Chunk]` — reads JSONL back into Chunk objects
-3. [x] Add round-trip test: save chunks, load them back, verify equality
-4. [x] Add `--output-dir` flag to `process` subcommand in `build_parser()`
-5. [x] Update `cmd_process()` to write `{manual_id}_chunks.jsonl` when `--output-dir` is provided
-6. [x] Add test for CLI output flag
-
-**Acceptance Criteria:**
-- [x] `save_chunks` produces valid JSONL
-- [x] `load_chunks` round-trips perfectly (identical Chunk objects)
-- [x] `pipeline process --output-dir ./out` writes chunks file
-- [x] All tests pass
-
----
-
-#### 3.2 Add manifest persistence
-
-**Recommendation Ref:** Q1 (complement)
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify — add `save_manifest()`, `load_manifest()`)
-- `tests/test_structural_parser.py` (modify — add persistence tests)
-- `src/pipeline/cli.py` (modify — write manifest alongside chunks)
-
-**Description:**
-Add manifest serialization to JSON (not JSONL — manifest is a single hierarchical document). Write alongside chunks in `pipeline process --output-dir`.
-
-**Tasks:**
-1. [x] Add `save_manifest(manifest: Manifest, output_path: Path) -> None`
-2. [x] Add `load_manifest(input_path: Path) -> Manifest`
-3. [x] Add round-trip test
-4. [x] Update `cmd_process()` to write `{manual_id}_manifest.json`
-
-**Acceptance Criteria:**
-- [x] Manifest serializes to readable JSON
-- [x] Round-trip preserves all fields
-- [x] All tests pass
-
----
-
-#### 3.3 Enable offline QA
-
-**Recommendation Ref:** N1
-**Files Affected:**
-- `src/pipeline/cli.py` (modify — rewrite `cmd_qa()`)
-- `tests/test_cli.py` (modify — add offline QA test)
-
-**Description:**
-Add `--chunks` and `--profile` flags to `pipeline qa`. Load chunks from JSONL, load profile from YAML, run `run_validation_suite()`. No Qdrant needed.
-
-**Tasks:**
-1. [x] Update `qa` subcommand in `build_parser()`: add `--chunks` (required), `--profile` (required), make `--manual-id` and `--test-set` optional
-2. [x] Rewrite `cmd_qa()`: if `--chunks` provided, load from JSONL and run offline validation
-3. [x] Print validation report to stdout (same format as `cmd_validate()`)
-4. [x] Add test: create temp JSONL, run offline QA, verify report
-5. [x] Keep existing Qdrant-required path as a future option
-
-**Acceptance Criteria:**
-- [x] `pipeline qa --chunks chunks.jsonl --profile profile.yaml` runs validation offline
-- [x] All 7 QA checks run on loaded chunks
-- [x] Exit code 0 on pass, 1 on failure
-- [x] All tests pass
-
----
-
-#### 3.4 Implement functional R5 and R8
+#### 3.1 Qualify Cross-References at Creation Time
 
 **Recommendation Ref:** Q3
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — `apply_rule_r5_table_integrity()`, `apply_rule_r8_figure_continuity()`)
-- `tests/test_chunk_assembly.py` (modify — add tests for table and figure handling)
+**Files Affected:** `src/pipeline/chunk_assembly.py`
 
 **Description:**
-R5 currently just returns `list(chunks)`. R8 appends the chunk in both branches. Make both rules functional.
+In `enrich_chunk_metadata()`, after collecting cross-reference matches, qualify them with `{manual_id}::` prefix:
 
-R5: For each chunk, detect tables via `detect_tables()`. If a table spans a chunk boundary (table starts in one chunk and continues in the next), merge those chunks. If a prior splitting rule broke a table apart, reassemble.
-
-R8: If a chunk starts with a figure reference line (matches `figure_pattern`) and the previous chunk's content references the same figure, merge the figure reference into the previous chunk.
-
-**Tasks:**
-1. [x] Implement R5: iterate chunks, detect tables within each, if a table's last line is the chunk's last line AND the next chunk starts with table-like content, merge
-2. [x] Implement R8: iterate chunks, if chunk starts with figure reference, check if previous chunk contains text referencing that figure — if so, merge
-3. [x] Add test for R5: create chunks where a table is split across two chunks, verify they get merged
-4. [x] Add test for R8: create chunks where a figure ref is separated from its context, verify merge
-5. [x] Run full test suite — existing pass-through behavior tests should still pass (rules were no-ops, so inputs that don't trigger the rules should produce identical output)
+```python
+# AFTER existing xref collection (line 744-748)
+manual_id = metadata.get("manual_id", "")
+if manual_id:
+    xref_matches = [f"{manual_id}::{ref}" for ref in xref_matches]
+metadata["cross_references"] = sorted(set(xref_matches))
+```
 
 **Acceptance Criteria:**
-- [x] R5 detects and re-merges split tables
-- [x] R8 detects and re-attaches orphaned figure references
-- [x] Existing tests still pass (rules were no-ops, so non-triggering inputs are unchanged)
-- [x] New tests verify merge behavior
-- [x] All tests pass
+- [ ] Cross-references include `{manual_id}::` prefix
+- [ ] Empty `manual_id` falls back to bare references (no crash)
+- [ ] Deduplication still works after qualification
+
+---
+
+#### 3.2 Downgrade Skip-Section References to Warning
+
+**Recommendation Ref:** Q3
+**Files Affected:** `src/pipeline/qa.py`
+
+**Description:**
+Add `profile` parameter to `check_cross_ref_validity()`. When a cross-reference target matches a skipped section prefix, emit a warning instead of an error. Update `run_validation_suite()` to pass `profile`.
+
+```python
+def check_cross_ref_validity(
+    chunks: list[Chunk],
+    profile: ManualProfile | None = None,
+) -> list[ValidationIssue]:
+    # ... existing logic ...
+
+    skip_prefixes: set[str] = set()
+    if profile and profile.skip_sections:
+        manual_id = chunks[0].manual_id if chunks else ""
+        for sid in profile.skip_sections:
+            skip_prefixes.add(f"{manual_id}::{sid}")
+
+    for chunk in chunks:
+        for ref in chunk.metadata.get("cross_references", []):
+            if ref not in all_chunk_ids and ref not in all_prefixes:
+                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
+                issues.append(
+                    ValidationIssue(
+                        check="cross_ref_validity",
+                        severity="warning" if is_skipped else "error",
+                        chunk_id=chunk.chunk_id,
+                        message=f"Cross-reference target not found: '{ref}'"
+                            + (" (skipped section)" if is_skipped else ""),
+                        details={"target": ref, "skipped": is_skipped},
+                    )
+                )
+```
+
+**Acceptance Criteria:**
+- [ ] `check_cross_ref_validity()` accepts optional `profile` parameter
+- [ ] References to skipped sections produce warnings, not errors
+- [ ] References to non-skipped missing targets still produce errors
+- [ ] `run_validation_suite()` passes `profile` to the function
+- [ ] Backward compatible — `profile=None` produces errors for all unresolved refs
+
+---
+
+#### 3.3 Tests
+
+**Recommendation Ref:** Q3
+**Files Affected:** `tests/test_qa.py`, `tests/test_chunk_assembly.py`
+
+**Description:**
+Add 5 tests across two files:
+
+**`tests/test_qa.py`:**
+1. `test_cross_ref_qualified_resolves` — chunk with `cross_references: ["xj-1999::7"]` and a chunk with ID starting with `xj-1999::7`. No error.
+2. `test_cross_ref_bare_id_fails` — chunk with `cross_references: ["7"]`. Error emitted.
+3. `test_cross_ref_skipped_section_is_warning` — chunk with `cross_references: ["xj-1999::8W"]`, profile with `skip_sections: ["8W"]`. Warning, not error.
+
+**`tests/test_chunk_assembly.py`:**
+4. `test_enrich_cross_refs_qualified` — text with "Refer to Group 7", profile with `manual_id: "xj-1999"`. Assert `metadata["cross_references"] == ["xj-1999::7"]`.
+5. `test_enrich_cross_refs_deduped` — text with "Refer to Group 7" twice. Assert single entry.
+
+**Acceptance Criteria:**
+- [ ] All 5 new tests pass
+- [ ] All existing cross-ref tests still pass
+- [ ] Total test count increases by 5
 
 ---
 
 ### Phase 3 Testing Requirements
-
-- [x] JSONL round-trip for chunks (save/load identity)
-- [x] JSON round-trip for manifest
-- [x] Offline QA produces correct validation report
-- [x] R5 merges split tables
-- [x] R8 merges orphaned figure references
-- [x] CLI `--output-dir` writes expected files
-- [x] All 250+ existing tests pass
-- [x] New tests added: ~15-20
+- [ ] Cross-ref qualification tested in chunk_assembly
+- [ ] Skip-section downgrade tested in qa
+- [ ] Backward compatibility verified (profile=None)
+- [ ] All 354+ existing tests pass
 
 ### Phase 3 Completion Checklist
-
-- [x] All work items complete
-- [x] All tests passing
-- [x] `CLAUDE.md` updated with new CLI flags and persistence functions
-- [x] No regressions introduced
+- [ ] Cross-refs qualified at creation time
+- [ ] Skip-section refs downgraded to warning
+- [ ] 5 new tests passing
+- [ ] No regressions introduced
 
 ---
 
-## Phase 4: Developer Experience
+## Phase 4: End-to-End Validation
 
-**Estimated Effort:** ~40,000 tokens (including testing/fixes)
-**Dependencies:** None (can run in parallel with Phases 1-3)
-**Parallelizable:** All work items are independent
+**Estimated Effort:** ~25,000 tokens (including iterative tuning)
+**Dependencies:** Phases 1, 2, and 3 (all must be complete)
+**Parallelizable:** No — final integration validation
 
 ### Goals
-
-- Add structured logging throughout the pipeline
-- Type ManifestEntry range fields
-- Add multi-page test fixtures
-- Configure mypy for type checking
+- Run the full pipeline with the production profile and confirm all metrics improve
+- Iteratively tune the production profile based on results
+- Achieve QA passing status
 
 ### Work Items
 
-#### 4.1 Add structured logging
+#### 4.1 Run Pipeline
 
-**Recommendation Ref:** A2
-**Files Affected:**
-- `src/pipeline/cli.py` (modify — configure logging, add `--verbose`/`--quiet`)
-- `src/pipeline/structural_parser.py` (modify — add debug logging)
-- `src/pipeline/ocr_cleanup.py` (modify — add debug logging)
-- `src/pipeline/chunk_assembly.py` (modify — add debug logging)
-- `src/pipeline/embeddings.py` (modify — add debug logging)
-- `src/pipeline/retrieval.py` (modify — add debug logging)
+**Recommendation Ref:** All
+**Files Affected:** None (validation only)
 
 **Description:**
-Add Python `logging` to every pipeline module. Configure via CLI flags. Replace `print()` calls with `logger.info()`.
-
-**Tasks:**
-1. [x] Add `import logging` and `logger = logging.getLogger(__name__)` to each source module
-2. [x] Replace all `print()` calls in `cli.py` with `logger.info()` / `logger.error()`
-3. [x] Add `--verbose` flag (sets DEBUG) and `--quiet` flag (sets WARNING) to CLI
-4. [x] Configure root logger in `main()` based on flags
-5. [x] Add `logger.debug()` calls at key decision points: boundary detection, rule application, embedding generation
-6. [x] Update CLI tests to capture log output instead of stdout
+```bash
+pipeline -v process \
+  --profile profiles/xj-1999.yaml \
+  --pdf "data/99 XJ Service Manual.pdf" \
+  --output-dir output/
+```
 
 **Acceptance Criteria:**
-- [x] All modules use `logging` instead of `print()`
-- [x] `--verbose` shows debug-level output
-- [x] Default shows info-level output
-- [x] `--quiet` suppresses info
-- [x] All tests pass
+- [ ] Pipeline completes without errors
 
 ---
 
-#### 4.2 Type ManifestEntry range fields
+#### 4.2 Run Validation with Diagnostics
 
-**Recommendation Ref:** A1
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify — add `PageRange`, `LineRange` dataclasses, update `ManifestEntry`)
-- `src/pipeline/chunk_assembly.py` (modify — update `.get("start", ...)` to attribute access)
-- `tests/test_structural_parser.py` (modify — update assertions)
-- `tests/test_chunk_assembly.py` (modify — update manifest construction)
-- `tests/conftest.py` (modify — update `sample_manifest_entry` fixture)
+**Recommendation Ref:** All
+**Files Affected:** None (validation only)
 
 **Description:**
-Replace `page_range: dict[str, str]` and `line_range: dict[str, int]` with typed dataclasses.
-
-**Tasks:**
-1. [x] Define `PageRange` and `LineRange` dataclasses in `structural_parser.py`
-2. [x] Update `ManifestEntry` fields
-3. [x] Update `build_manifest()` to construct typed ranges
-4. [x] Search for `.get("start"` and `.get("end"` — update to `.start` / `.end`
-5. [x] Update test fixtures and assertions
-6. [x] Run full test suite
+```bash
+pipeline -v validate \
+  --profile profiles/xj-1999.yaml \
+  --pdf "data/99 XJ Service Manual.pdf" \
+  --diagnostics
+```
 
 **Acceptance Criteria:**
-- [x] No dict-style access on range fields
-- [x] `entry.line_range.start` / `entry.line_range.end` work correctly
-- [x] `entry.page_range.start` / `entry.page_range.end` work correctly
-- [x] All tests pass
+- [ ] Validation completes
+- [ ] Diagnostics output shows improved boundary distribution
 
 ---
 
-#### 4.3 Add multi-page test fixtures
+#### 4.3 Compare Metrics
 
-**Recommendation Ref:** X2
-**Files Affected:**
-- `tests/conftest.py` (modify — add multi-page fixtures)
-- `tests/test_structural_parser.py` (modify — add multi-page boundary tests)
-- `tests/test_chunk_assembly.py` (modify — add multi-page assembly tests)
+**Recommendation Ref:** All
 
 **Description:**
-Current test fixtures are all single-page. The cross-page slicing bug (fixed in Phase 1) was latent because no test exercised multi-page behavior. Add multi-page fixtures to prevent regression.
+Compare pipeline output against baseline:
 
-Note: Phase 1 (item 1.1) adds a minimal multi-page test to catch the coordinate bug. This work item adds comprehensive multi-page coverage: multiple boundaries per page, cross-page sections, edge cases (boundary on first/last line of a page).
-
-**Tasks:**
-1. [x] Create `xj_multipage_fixture` — 3 pages with Group, Section, Procedure boundaries spanning pages
-2. [x] Create `tm9_multipage_fixture` — 2 pages with Chapter and Section boundaries
-3. [x] Write tests: detect boundaries across pages, verify global line numbers
-4. [x] Write tests: build manifest from multi-page boundaries, verify chunk_ids and line_ranges
-5. [x] Write tests: assemble chunks from multi-page manifest, verify text extraction
-6. [x] Write edge case test: boundary on first line of page 2
+| Metric | Before | Target |
+|--------|--------|--------|
+| Total chunks | 2,408 | 1,500-2,500 |
+| L1 boundaries | 2,748 | ~55 |
+| L2 boundaries | 3,432 | ~200-400 |
+| L3 boundaries | 82 | 500+ |
+| L4 boundaries | 53 | 200+ |
+| Undersized chunks (<100 tok) | 637 (26%) | <10% |
+| Cross-ref errors | 113 | 0 |
+| Cross-ref warnings (8W) | 0 | ~3 |
+| known_ids warnings | 1,716 | <20 |
+| False-positive boundaries (<=3 words) | 17% | <5% |
+| QA passed | False | True |
 
 **Acceptance Criteria:**
-- [x] At least 2 multi-page fixtures covering different profile types
-- [x] Boundary detection correctly handles page transitions
-- [x] Manifest line_range values are global offsets
-- [x] Chunk text extraction is correct for boundaries on any page
-- [x] All tests pass
+- [ ] All metrics improve or stay within acceptable range
+- [ ] QA passes (zero errors)
 
 ---
 
-#### 4.4 Configure mypy
+#### 4.4 Iterative Tuning
 
-**Recommendation Ref:** X1
-**Files Affected:**
-- `pyproject.toml` (modify — add `[tool.mypy]` section)
-- `pyproject.toml` (modify — add `mypy` to dev dependencies)
+**Recommendation Ref:** Q2, Q5
 
 **Description:**
-Add mypy to the project for static type checking. Start with permissive settings and fix any immediate errors.
-
-**Tasks:**
-1. [x] Add `"mypy>=1.0"` to `[project.optional-dependencies] dev`
-2. [x] Add `[tool.mypy]` section to `pyproject.toml` with `python_version = "3.10"`, `warn_return_any = true`, `warn_unused_configs = true`
-3. [x] Run `mypy src/pipeline/` and fix any type errors
-4. [x] Document mypy invocation in CLAUDE.md Quick Reference
+After the first run, review output for:
+- Missing `a`-suffixed group variants — add to known_ids if discovered
+- L3 procedure keywords not in the closed vocabulary — add to pattern
+- L4 false positives from overly broad component pattern — tighten if needed
+- Remaining undersized chunks — identify patterns and address
 
 **Acceptance Criteria:**
-- [x] `mypy src/pipeline/` passes (possibly with some `# type: ignore` for Qdrant client)
-- [x] Dev install includes mypy
-- [x] All tests still pass
+- [ ] All discovered variants added to profile
+- [ ] No systematic false-positive patterns remain
 
 ---
 
-### Phase 4 Testing Requirements
+#### 4.5 Run Full Test Suite
 
-- [x] Logging output captured and verified in CLI tests
-- [x] Typed ranges pass all existing tests
-- [x] Multi-page tests cover page transitions and edge cases
-- [x] mypy passes on all source modules
-- [x] All 250+ existing tests pass
-- [x] New tests added: ~15-20
+**Recommendation Ref:** All
+
+**Description:**
+```bash
+pytest -v --tb=short
+```
+
+All 349 existing tests plus ~10 new tests from Phases 1 and 3 must pass.
+
+**Acceptance Criteria:**
+- [ ] All tests pass (expected: 359+)
+- [ ] No regressions
+
+---
 
 ### Phase 4 Completion Checklist
-
-- [x] All work items complete
-- [x] All tests passing
-- [x] CLAUDE.md updated (Quick Reference, Key Data Types)
-- [x] No regressions introduced
+- [ ] Pipeline runs end-to-end with production profile
+- [ ] All metric targets met or close
+- [ ] QA passes
+- [ ] Full test suite green
+- [ ] Profile tuned based on iterative findings
 
 ---
 
 ## Parallel Work Opportunities
 
-Phases 1 and 2 are fully independent and can execute concurrently. Phase 3 depends on Phase 1 (metadata must be correct before persisting). Phase 4 is independent of everything.
+Phases 1 and 3 are fully independent and can execute concurrently:
 
-| Work Stream | Can Run With | Notes |
-|-------------|--------------|-------|
-| Phase 1 (Data Integrity) | Phase 2, Phase 4 | Touches parser, assembler metadata, embeddings |
-| Phase 2 (Reliability) | Phase 1, Phase 4 | Touches embeddings HTTP, retrieval error handling, CLI, regex |
-| Phase 3 (Persistence) | Phase 4 | Blocked by Phase 1 (needs correct metadata) |
-| Phase 4 (DX) | Phase 1, Phase 2 | Touches logging, types, tests — orthogonal to fixes |
-
-Within phases, work items can often run in parallel:
-
-| Item | Can Run With | Conflict |
-|------|--------------|----------|
-| 1.1 (coordinates) | — | Must complete before 1.2, 1.3 test (touches same files) |
-| 1.2 (metadata) | 1.3 (embedding) | Independent — different files |
-| 2.1 (timeout) | 2.2, 2.3, 2.4, 2.5 | All independent |
-| 3.1 (chunk JSONL) | 3.4 (R5/R8) | Independent |
-| 3.2 (manifest JSON) | 3.4 (R5/R8) | Independent |
-| 4.1 (logging) | 4.2, 4.3, 4.4 | 4.1 touches many files; run separately to avoid merge conflicts |
+| Work Item | Can Run With | Notes |
+|-----------|--------------|-------|
+| Phase 1 (known_ids filter) | Phase 3 (cross-ref fix) | Different files: profile.py + parser vs. chunk_assembly + qa |
+| 1.1 (schema) | 3.1 (qualify refs) | No file overlap |
+| 1.2 (dataclass) | 3.2 (downgrade) | Different modules |
+| 1.3 (filter) | 3.3 (tests) | Different test files |
+| 1.4 (tests) | 3.3 (tests) | Different test classes |
+| Phase 2 (profile) | — | Depends on Phase 1 |
+| Phase 4 (validation) | — | Depends on all |
 
 ---
 
@@ -612,54 +528,45 @@ Within phases, work items can often run in parallel:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Cross-page fix breaks single-page tests | Medium | Medium | Single-page behavior is a special case of global offsets (page 0 offset = 0). Existing tests should work with minor adjustments. |
-| Metadata additions break test assertions | Low | Low | Tests that assert exact metadata dicts need updating. Use `assert "manual_id" in chunk.metadata` rather than exact dict comparison. |
-| Embedding contract change affects downstream | Medium | Medium | No downstream consumers yet (Qdrant is stubbed in tests). The change is purely correctness. |
-| JSONL format needs future changes | Low | Medium | Use a simple, flat format. Include a `_version` field in the JSONL header for future compat. |
-| R5/R8 implementation creates false merges | Medium | Medium | Start conservative — only merge when both signals agree (table pattern match AND adjacency). Add regression tests. |
-| Logging changes break CLI test assertions | Medium | Low | Use `caplog` fixture instead of `capsys` in tests. Keep structured output for programmatic use. |
-| mypy reveals many type errors | Low | Low | Start permissive. `# type: ignore` on Qdrant client types. Fix real errors, skip vendor types. |
+| L4 pattern too broad, creates false positives | Medium | Medium | `min_content_words: 3` guards against empty component headers. Monitor during Phase 4, tighten if false-positive rate > 10%. |
+| `a`-suffixed group variants rejected by known_ids filter | Medium | Low | Phase 4.4 handles iteratively — discover and add during first validation run. |
+| L3 closed vocabulary misses non-standard procedure names | Low | Medium | Start with Chrysler standard keywords. Add more during Phase 4.4 if genuine procedures are missed. |
+| Test fixture changes break existing tests | Zero | — | Test fixture is NOT modified. Production profile is a separate file. |
+| Cross-ref qualification changes metadata format | Low | Low | References were previously bare — now qualified. QA validator already supports prefix matching. |
+| Pattern changes interact unexpectedly with disambiguation | Low | High | The known_ids filter runs in `filter_boundaries()` AFTER `detect_boundaries()`, not during it. Disambiguation sees the same input. Filter cleans up afterward. |
 
 ---
 
-## Success Metrics (All Met - 2026-02-16)
+## Success Metrics
 
-- [x] Cross-page chunk extraction produces correct text for the 7 real PDFs in `data/`
-- [x] No QA false positives from metadata contract mismatch
-- [x] Embedding input includes hierarchical context for every chunk
-- [x] `bootstrap-profile` returns error (not silent success)
-- [x] HTTP timeout prevents hanging on Ollama failure
-- [x] Retrieval failures are visible (warnings, not silent)
-- [x] Chunks persist to JSONL and round-trip correctly
-- [x] Offline QA works without external services
-- [x] R5 and R8 are functional (not no-ops)
-- [x] All 250+ tests pass at every phase boundary
-- [x] mypy passes on source modules
+| Metric | Current (Baseline) | Target | Measurement |
+|--------|-------------------|--------|-------------|
+| QA passed | False | True | `pipeline validate` exit code 0 |
+| Cross-ref errors | 113 | 0 | QA report error count |
+| known_ids warnings | 1,716 | <20 | QA report warning count |
+| L1 false positives | ~2,700 | 0 | Boundary diagnostics |
+| L3 procedure detection | 82 (8%) | 500+ (target) | Boundary diagnostics level distribution |
+| Undersized chunks | 637 (26%) | <10% | Chunk size distribution |
+| Total tests | 349 | 359+ | `pytest` summary |
 
 ---
 
-## Appendix: Requirement Traceability
+## Files Changed
 
-| Recommendation | REVIEW.md Ref | Phase | Work Item |
-|----------------|---------------|-------|-----------|
-| D1 — Cross-page coordinates | Critical #1 | 1 | 1.1 |
-| D2 — Metadata alignment | High #2 | 1 | 1.2 |
-| D3 — Embedding contract | High #3 | 1 | 1.3 |
-| R1 — HTTP timeout/retry | Should Fix #6 | 2 | 2.1 |
-| R2 — Surface retrieval failures | Must Fix #7 | 2 | 2.2 |
-| R3 — Regex consistency | Should Fix #8 | 2 | 2.3 |
-| R4 — Bootstrap fail-fast | Must Fix #4 | 2 | 2.4 |
-| R5 — Deterministic IDs | Should Fix #5 | 2 | 2.5 |
-| Q1 — Chunk persistence | New finding | 3 | 3.1, 3.2 |
-| Q3 — R5/R8 no-ops | New finding | 3 | 3.4 |
-| N1 — Offline QA | New finding | 3 | 3.3 |
-| A1 — Typed ranges | New finding | 4 | 4.2 |
-| A2 — Structured logging | New finding | 4 | 4.1 |
-| X1 — mypy | New finding | 4 | 4.4 |
-| X2 — Multi-page tests | New finding | 4 | 4.3 |
+| File | Phase | Change |
+|------|-------|--------|
+| `schema/manual_profile_v1.schema.json` | 1 | Add `require_known_id` property |
+| `src/pipeline/profile.py` | 1 | Add `require_known_id` field to `HierarchyLevel` |
+| `src/pipeline/structural_parser.py` | 1 | Add known_id filtering pass (Pass 0) in `filter_boundaries()` |
+| `tests/test_structural_parser.py` | 1 | Add `TestRequireKnownId` class (5 tests) |
+| `profiles/xj-1999.yaml` | 2 | New production profile |
+| `tests/test_profile.py` | 2 | Add production profile regression test |
+| `src/pipeline/chunk_assembly.py` | 3 | Qualify cross-refs with `manual_id::` in `enrich_chunk_metadata()` |
+| `src/pipeline/qa.py` | 3 | Add `profile` param to `check_cross_ref_validity()`; downgrade skip-section refs |
+| `tests/test_qa.py` | 3 | Add cross-ref qualification tests (3 tests) |
+| `tests/test_chunk_assembly.py` | 3 | Add cross-ref enrichment tests (2 tests) |
 
 ---
 
 *Implementation plan generated by Claude on 2026-02-16*
-*All phases completed on 2026-02-16 — 349 tests passing*
-*Source: RECOMMENDATIONS.md + REVIEW.md architectural audit*
+*Based on: RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md*

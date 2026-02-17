@@ -241,8 +241,14 @@ def check_duplicate_content(
 
 def check_cross_ref_validity(
     chunks: list[Chunk],
+    profile: ManualProfile | None = None,
 ) -> list[ValidationIssue]:
-    """Verify every cross-reference target resolves to a real chunk ID."""
+    """Verify every cross-reference target resolves to a real chunk ID.
+
+    When *profile* is provided and has ``skip_sections``, references that
+    resolve to a skipped section are downgraded from error to warning
+    (the target is intentionally absent from the chunk set).
+    """
     issues: list[ValidationIssue] = []
 
     # Build a set of all known chunk IDs
@@ -254,21 +260,35 @@ def check_cross_ref_validity(
         for k in range(1, len(parts) + 1):
             all_prefixes.add("::".join(parts[:k]))
 
+    # Build skip prefixes from profile.skip_sections so that references
+    # to intentionally skipped sections produce warnings, not errors.
+    skip_prefixes: set[str] = set()
+    if profile and profile.skip_sections:
+        manual_id = chunks[0].manual_id if chunks else ""
+        for sid in profile.skip_sections:
+            skip_prefixes.add(f"{manual_id}::{sid}")
+
     for chunk in chunks:
         cross_refs = chunk.metadata.get("cross_references", [])
         if not cross_refs:
             continue
 
         for ref in cross_refs:
-            # Check if the reference resolves to any known chunk ID or prefix
-            if ref not in all_chunk_ids and ref not in all_prefixes:
+            # Check if the reference resolves to any known chunk ID or prefix.
+            # Also check string-prefix matching for group families (e.g.,
+            # "xj-1999::8" should match "xj-1999::8A", "xj-1999::8B", etc.)
+            if ref not in all_chunk_ids and ref not in all_prefixes and not any(
+                p.startswith(ref) for p in all_prefixes
+            ):
+                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
                 issues.append(
                     ValidationIssue(
                         check="cross_ref_validity",
-                        severity="error",
+                        severity="warning" if is_skipped else "error",
                         chunk_id=chunk.chunk_id,
-                        message=f"Cross-reference target not found: '{ref}'",
-                        details={"target": ref},
+                        message=f"Cross-reference target not found: '{ref}'"
+                            + (" (skipped section)" if is_skipped else ""),
+                        details={"target": ref, "skipped": is_skipped},
                     )
                 )
 
@@ -338,7 +358,7 @@ def run_validation_suite(
 
     # 6. Cross-reference validity
     checks_run.append("cross_ref_validity")
-    all_issues.extend(check_cross_ref_validity(chunks))
+    all_issues.extend(check_cross_ref_validity(chunks, profile))
 
     # 7. Profile validation
     checks_run.append("profile_validation")
