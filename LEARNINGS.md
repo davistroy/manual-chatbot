@@ -19,3 +19,12 @@ Issues encountered and solutions discovered during implementation.
 - Safety regex pre-compilation with `re.IGNORECASE` must use the compiled pattern object (not pattern string) for case-insensitive matching
 - Structured logging with Python's `logging` module requires `logging.basicConfig()` configuration before any handlers emit output
 - CLI testing for log output requires `caplog` fixture instead of `capsys` when using `logging` module
+
+## Output Quality Round (2026-02-16)
+
+- `require_known_id` filter is highly effective at eliminating false-positive L1 boundaries — dropped from ~2,748 to only valid group IDs
+- Cross-reference qualification with `manual_id::` prefix is essential for multi-manual environments and prevents false resolution
+- Chrysler group numbering uses "Group 8" to refer to the entire 8A-8W electrical family — cross-ref validation needs string-prefix matching (not just `::` segment matching) to handle this
+- L3 closed-vocabulary procedure patterns work well but produce undersized chunks when the procedure has minimal content
+- Skip-section downgrade (error → warning) for wiring diagrams (8W) keeps QA clean while preserving the reference information
+- Production profiles should be separate from test fixtures — prevents regressions and allows independent tuning
