@@ -1,0 +1,143 @@
+schema_version: "1.0"
+manual_id: "xj-1999"
+manual_title: "1999 Jeep Cherokee (XJ) Factory Service Manual"
+source_url: "https://example.com/xj-manual.pdf"
+source_format: "pdf-ocr"
+
+vehicles:
+  - model: "Cherokee XJ"
+    years: "1999"
+    drive_type: ["2WD", "4WD"]
+    engines:
+      - name: "2.5L I4 MPI Gasoline"
+        code: "EPE"
+        aliases: ["2.5L", "2.5", "four cylinder", "I4", "2.5 liter"]
+      - name: "4.0L I6 MPI Gasoline"
+        code: "ERH"
+        aliases: ["4.0L", "4.0", "six cylinder", "inline 6", "I6", "4.0 liter"]
+      - name: "2.5L I4 Diesel"
+        code: "diesel"
+        aliases: ["2.5L diesel", "diesel", "turbo diesel"]
+    transmissions:
+      - name: "AX5 5-Speed Manual"
+        code: "DDQ"
+      - name: "AW4 4-Speed Automatic"
+        code: "DGS"
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "group"
+      id_pattern: "^(\\d+[A-Z]?[a-z]?)\\s"
+      title_pattern: "^\\d+[A-Z]?[a-z]?\\s+(.+)"
+      require_known_id: true
+      known_ids:
+        - { id: "IN", title: "Introduction" }
+        - { id: "0", title: "Lubrication and Maintenance" }
+        - { id: "2", title: "Suspension" }
+        - { id: "3", title: "Differential and Driveline" }
+        - { id: "5", title: "Brakes" }
+        - { id: "6", title: "Clutch" }
+        - { id: "7", title: "Cooling System" }
+        - { id: "8A", title: "Battery" }
+        - { id: "8B", title: "Starting System" }
+        - { id: "8C", title: "Charging System" }
+        - { id: "8D", title: "Ignition System" }
+        - { id: "8E", title: "Instrument Panel Systems" }
+        - { id: "8F", title: "Audio Systems" }
+        - { id: "8G", title: "Horn Systems" }
+        - { id: "8H", title: "Vehicle Speed Control System" }
+        - { id: "8J", title: "Turn Signal and Hazard Warning Systems" }
+        - { id: "8K", title: "Wiper and Washer Systems" }
+        - { id: "8L", title: "Lamps" }
+        - { id: "8M", title: "Passive Restraint Systems" }
+        - { id: "8N", title: "Electrically Heated Systems" }
+        - { id: "8O", title: "Power Distribution Systems" }
+        - { id: "8P", title: "Power Lock Systems" }
+        - { id: "8Q", title: "Vehicle Theft/Security Systems" }
+        - { id: "8R", title: "Power Seats Systems" }
+        - { id: "8S", title: "Power Window Systems" }
+        - { id: "8T", title: "Power Mirror Systems" }
+        - { id: "8U", title: "Chime/Buzzer Warning Systems" }
+        - { id: "8V", title: "Overhead Console Systems" }
+        - { id: "8W", title: "Wiring Diagrams" }
+        - { id: "9", title: "Engine" }
+        - { id: "11", title: "Exhaust System and Intake Manifold" }
+        - { id: "13", title: "Frame and Bumpers" }
+        - { id: "14", title: "Fuel System" }
+        - { id: "19", title: "Steering" }
+        - { id: "21", title: "Transmission and Transfer Case" }
+        - { id: "22", title: "Tires and Wheels" }
+        - { id: "23", title: "Body" }
+        - { id: "24", title: "Heating and Air Conditioning" }
+        - { id: "25", title: "Emission Control Systems" }
+    - level: 2
+      name: "section"
+      id_pattern: "^(?!REMOVAL|INSTALLATION|REMOVAL AND INSTALLATION|DIAGNOSIS|DIAGNOSIS AND TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY|ASSEMBLY|DISASSEMBLY AND ASSEMBLY|CLEANING|INSPECTION|CLEANING AND INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|TESTING|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
+      title_pattern: "^(?!REMOVAL|INSTALLATION|REMOVAL AND INSTALLATION|DIAGNOSIS|DIAGNOSIS AND TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY|ASSEMBLY|DISASSEMBLY AND ASSEMBLY|CLEANING|INSPECTION|CLEANING AND INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|TESTING|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
+    - level: 3
+      name: "procedure"
+      id_pattern: null
+      title_pattern: "^(REMOVAL AND INSTALLATION|REMOVAL|INSTALLATION|DIAGNOSIS AND TESTING|DIAGNOSIS|TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY AND ASSEMBLY|DISASSEMBLY|ASSEMBLY|CLEANING AND INSPECTION|CLEANING|INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)$"
+      min_gap_lines: 0
+      min_content_words: 3
+      require_blank_before: false
+    - level: 4
+      name: "sub-procedure"
+      id_pattern: null
+      title_pattern: "^([A-Z][A-Z][A-Z \\-/]{1,}(?:\\([A-Z0-9\\. ]+\\))?)$"
+      min_content_words: 3
+  page_number:
+    pattern: "(?:XJ\\s+)?(?:[A-Z ]+)\\s+(\\d+[A-Z]?)\\s*-\\s*(\\d+)"
+    group_prefixed: true
+  step_patterns:
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "\\(Fig\\.\\s+(\\d+)\\)"
+    scope: "per-section"
+  cross_reference:
+    patterns:
+      - "Refer to Group (\\d+[A-Z]?)"
+      - "Refer to (Section \\d+)"
+
+safety_callouts:
+  - level: "warning"
+    pattern: "^WARNING:"
+    style: "block"
+  - level: "caution"
+    pattern: "^CAUTION:"
+    style: "block"
+  - level: "note"
+    pattern: "^NOTE:"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: true
+    structure: "mileage-bands"
+    description: "Two schedules (A and B) with mileage intervals."
+  wiring_diagrams:
+    present: true
+    section_id: "8W"
+  specification_tables:
+    location: "inline"
+
+ocr_cleanup:
+  quality_estimate: "fair"
+  known_substitutions:
+    - { from: "IJURY", to: "INJURY" }
+    - { from: "Mopart", to: "Mopar" }
+  header_footer_patterns:
+    - "^XJ\\s+[A-Z ]+\\d+[A-Z]?\\s*-\\s*\\d+"
+    - "^\\d+[A-Z]?\\s*-\\s*\\d+\\s+[A-Z ]+XJ$"
+    - "\\(Continued\\)$"
+  garbage_detection:
+    enabled: true
+    threshold: 0.5
+
+variants:
+  has_market_variants: true
+  variant_indicator: "suffix_a"
+  markets: ["domestic", "international"]
+
+skip_sections: ["8W"]

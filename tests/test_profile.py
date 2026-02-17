@@ -481,3 +481,53 @@ class TestCompilePatterns:
         patterns = compile_patterns(profile)
         hierarchy_patterns = patterns["hierarchy"]
         assert any(p.match("CHAPTER 3") for p in hierarchy_patterns)
+
+
+# ── Production Profile Regression Tests ──────────────────────────
+
+
+PRODUCTION_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "xj-1999.yaml"
+
+
+class TestProductionXjProfile:
+    """Integration tests for the production XJ profile (profiles/xj-1999.yaml).
+
+    These tests ensure the production profile remains loadable, valid, and
+    structurally correct across code changes.
+    """
+
+    def test_production_profile_loads(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        assert isinstance(profile, ManualProfile)
+        assert profile.manual_id == "xj-1999"
+
+    def test_production_profile_validates_no_errors(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        errors = validate_profile(profile)
+        assert errors == [], f"Validation errors: {errors}"
+
+    def test_production_profile_all_patterns_compile(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        patterns = compile_patterns(profile)
+        # Every category should contain compiled re.Pattern objects
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled: {p}"
+                )
+
+    def test_production_profile_known_ids_count(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        known_ids = profile.hierarchy[0].known_ids
+        assert len(known_ids) >= 35, (
+            f"Expected >= 35 known_ids, got {len(known_ids)}"
+        )
+
+    def test_production_profile_l1_require_known_id(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].require_known_id is True
+
+    def test_production_profile_l3_title_pattern_contains_removal(self):
+        profile = load_profile(PRODUCTION_PROFILE_PATH)
+        l3 = profile.hierarchy[2]
+        assert "REMOVAL" in l3.title_pattern
