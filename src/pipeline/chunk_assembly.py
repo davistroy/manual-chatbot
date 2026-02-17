@@ -635,6 +635,77 @@ def apply_rule_r8_figure_continuity(
     return result
 
 
+def _extract_level1_id(chunk: Chunk) -> str:
+    """Extract the level-1 group ID from a chunk's chunk_id.
+
+    Chunk IDs follow the pattern ``{manual_id}::{level1_id}::...``.
+    Returns the second ``::``-delimited segment, or an empty string if
+    the chunk_id has fewer than two segments.
+    """
+    parts = chunk.chunk_id.split("::")
+    if len(parts) >= 2:
+        return parts[1]
+    return ""
+
+
+def merge_small_across_entries(
+    chunks: list[Chunk], min_tokens: int = 200
+) -> list[Chunk]:
+    """Post-assembly merge pass: absorb tiny chunks into their next sibling.
+
+    Iterates the full chunk list left to right.  For each chunk whose token
+    count is below *min_tokens*, the chunk's text is prepended to the next
+    chunk **if** both chunks share the same level-1 group (extracted from
+    ``chunk_id``).  The absorbing chunk keeps its own metadata; the tiny
+    chunk is dropped.
+
+    Runs multiple passes (up to 10) until no further merges occur so that
+    chains of tiny chunks collapse fully.
+
+    Returns a new list — the input list is not mutated.
+    """
+    if not chunks:
+        return []
+
+    working = list(chunks)
+    max_passes = 10
+
+    for pass_num in range(max_passes):
+        before = len(working)
+        merged: list[Chunk] = []
+        i = 0
+        while i < len(working):
+            current = working[i]
+
+            if count_tokens(current.text) < min_tokens and i + 1 < len(working):
+                next_chunk = working[i + 1]
+                current_l1 = _extract_level1_id(current)
+                next_l1 = _extract_level1_id(next_chunk)
+
+                if current_l1 == next_l1:
+                    # Prepend current text to next chunk; next chunk keeps its metadata
+                    combined_text = current.text + "\n\n" + next_chunk.text
+                    working[i + 1] = Chunk(
+                        chunk_id=next_chunk.chunk_id,
+                        manual_id=next_chunk.manual_id,
+                        text=combined_text,
+                        metadata=next_chunk.metadata,
+                    )
+                    i += 1
+                    continue
+
+            merged.append(current)
+            i += 1
+
+        working = merged
+        after = len(working)
+        if after == before:
+            break  # Stable — no merges occurred this pass
+
+    logger.debug("Cross-entry merge: %d → %d chunks", len(chunks), len(working))
+    return working
+
+
 def enrich_chunk_metadata(
     text: str, metadata: dict[str, Any], profile: ManualProfile
 ) -> None:
@@ -874,6 +945,11 @@ def assemble_chunks(
                     metadata=metadata,
                 )
             )
+
+    # Post-assembly cross-entry merge: merge tiny chunks into next sibling
+    # within the same level-1 group to eliminate orphan fragments that the
+    # per-entry R6 pass cannot reach (it only sees chunks within one entry).
+    result_chunks = merge_small_across_entries(result_chunks)
 
     logger.debug("Assembled %d chunks from %d manifest entries", len(result_chunks), len(manifest.entries))
     return result_chunks

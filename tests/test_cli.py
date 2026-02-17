@@ -7,7 +7,8 @@ import json
 
 import pytest
 
-from pipeline.cli import build_parser, main
+from pipeline.cli import build_parser, main, _print_boundary_diagnostics
+from pipeline.structural_parser import Boundary
 
 
 # ── Parser Tests ──────────────────────────────────────────────────
@@ -123,10 +124,122 @@ class TestBuildParser:
         with pytest.raises(SystemExit):
             parser.parse_args(["validate-chunks"])
 
+    def test_validate_accepts_diagnostics_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate", "--profile", "p.yaml", "--pdf", "m.pdf", "--diagnostics"]
+        )
+        assert args.diagnostics is True
+
+    def test_validate_diagnostics_defaults_to_false(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["validate", "--profile", "p.yaml", "--pdf", "m.pdf"]
+        )
+        assert args.diagnostics is False
+
     def test_no_subcommand_shows_help(self):
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([])
+
+
+# ── Boundary Diagnostics Tests ────────────────────────────────────
+
+
+class TestBoundaryDiagnostics:
+    """Test _print_boundary_diagnostics output and computations."""
+
+    def test_diagnostics_with_no_boundaries(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            result = _print_boundary_diagnostics([], ["some page text"])
+        assert "Total boundaries: 0" in caplog.text
+        assert "no boundaries detected" in caplog.text
+        assert result == []
+
+    def test_diagnostics_reports_total_and_per_page(self, caplog):
+        import logging
+
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="Intro", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="SP", page_number=0, line_number=5),
+            Boundary(level=1, level_name="group", id="1", title="Engine", page_number=1, line_number=12),
+        ]
+        pages = ["line0\nline1\nline2\nline3\nline4\nline5 section heading\nline6\nline7\nline8\nline9",
+                 "line10\nline11\nline12 engine group\nline13\nline14\nline15 with some more words here"]
+
+        with caplog.at_level(logging.INFO):
+            _print_boundary_diagnostics(boundaries, pages)
+        assert "Total boundaries: 3" in caplog.text
+        assert "Boundaries per page: 1.5 avg" in caplog.text
+
+    def test_diagnostics_reports_content_size_distribution(self, caplog):
+        import logging
+
+        # Two boundaries: first spans 3 lines, second spans the rest
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="G1", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="S1", page_number=0, line_number=3),
+        ]
+        pages = ["heading one\nfiller two\nfiller three\nsection heading\nfiller four five six seven"]
+
+        with caplog.at_level(logging.INFO):
+            _print_boundary_diagnostics(boundaries, pages)
+        assert "Content between boundaries:" in caplog.text
+        assert "min=" in caplog.text
+        assert "median=" in caplog.text
+        assert "max=" in caplog.text
+
+    def test_diagnostics_detects_false_positives(self, caplog):
+        import logging
+
+        # Two boundaries right next to each other — only 1 word between
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="G1", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="S1", page_number=0, line_number=1),
+        ]
+        pages = ["heading\nsection heading\nsome longer content with many words here"]
+
+        with caplog.at_level(logging.INFO):
+            result = _print_boundary_diagnostics(boundaries, pages)
+        assert "Suspected false positives" in caplog.text
+        # First boundary has only 1 word ("heading") between line 0 and line 1
+        assert len(result) >= 1
+
+    def test_diagnostics_reports_level_distribution(self, caplog):
+        import logging
+
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="G1", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="S1", page_number=0, line_number=3),
+            Boundary(level=2, level_name="section", id=None, title="S2", page_number=0, line_number=6),
+        ]
+        pages = ["g1 heading\nfiller\nfiller\ns1 heading\nfiller\nfiller\ns2 heading\nfiller"]
+
+        with caplog.at_level(logging.INFO):
+            _print_boundary_diagnostics(boundaries, pages)
+        assert "Level distribution:" in caplog.text
+        assert "level1=1" in caplog.text
+        assert "level2=2" in caplog.text
+
+    def test_diagnostics_returns_false_positive_tuples(self):
+        """False positives are returned as (boundary, word_count) tuples."""
+        # Boundary with only 1 word of content before the next boundary
+        boundaries = [
+            Boundary(level=1, level_name="group", id="0", title="G1", page_number=0, line_number=0),
+            Boundary(level=2, level_name="section", id=None, title="S1", page_number=0, line_number=1),
+        ]
+        pages = ["one\ntwo three four five six seven eight nine ten"]
+
+        result = _print_boundary_diagnostics(boundaries, pages)
+        assert len(result) >= 1
+        # Each element is (boundary, word_count)
+        boundary, word_count = result[0]
+        assert isinstance(boundary, Boundary)
+        assert isinstance(word_count, int)
+        assert word_count <= 3
 
 
 # ── Main Entry Point Tests ────────────────────────────────────────

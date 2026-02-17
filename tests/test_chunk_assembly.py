@@ -25,6 +25,7 @@ from pipeline.chunk_assembly import (
     detect_tables,
     enrich_chunk_metadata,
     load_chunks,
+    merge_small_across_entries,
     save_chunks,
     tag_vehicle_applicability,
 )
@@ -421,6 +422,118 @@ class TestRuleR6MergeSmall:
     def test_single_small_chunk_stays(self):
         result = apply_rule_r6_merge_small(["Tiny."], min_tokens=200)
         assert len(result) == 1
+
+
+# ── Cross-Entry Merge Tests ───────────────────────────────────────
+
+
+class TestCrossEntryMerge:
+    """Test merge_small_across_entries — post-assembly merge of tiny chunks."""
+
+    def _make_chunk(
+        self, chunk_id: str, word_count: int, manual_id: str = "m1"
+    ) -> Chunk:
+        """Build a Chunk with *word_count* words of filler text."""
+        text = " ".join(f"word{i}" for i in range(word_count))
+        return Chunk(
+            chunk_id=chunk_id,
+            manual_id=manual_id,
+            text=text,
+            metadata={"level1_id": chunk_id.split("::")[1] if "::" in chunk_id else ""},
+        )
+
+    def test_tiny_chunks_absorbed_into_next_sibling(self):
+        """Chunks of [10, 5, 300, 8, 400] words — tiny ones merge into next sibling."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 10),
+            self._make_chunk("m1::A::p2", 5),
+            self._make_chunk("m1::A::p3", 300),
+            self._make_chunk("m1::A::p4", 8),
+            self._make_chunk("m1::A::p5", 400),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The three tiny chunks (10, 5, 8 words) should be absorbed;
+        # we expect fewer chunks than the original 5
+        assert len(result) < len(chunks)
+        # The 300-word and 400-word chunks should survive (possibly with
+        # prepended text from tiny predecessors)
+        all_text = " ".join(c.text for c in result)
+        assert "word299" in all_text  # from the 300-word chunk
+        assert "word399" in all_text  # from the 400-word chunk
+
+    def test_no_merge_across_level1_boundary(self):
+        """Chunks spanning a level-1 boundary must NOT merge across it."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 10),   # tiny, group A
+            self._make_chunk("m1::B::p1", 300),   # large, group B
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The tiny chunk in group A should NOT merge into the group-B chunk
+        assert len(result) == 2
+
+    def test_single_tiny_chunk_at_end_of_group_kept(self):
+        """A tiny chunk at the end of its group with no next sibling stays as-is."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 300),
+            self._make_chunk("m1::A::p2", 10),    # tiny, last in group A
+            self._make_chunk("m1::B::p1", 300),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # The tiny chunk cannot merge forward (next chunk is group B),
+        # so it stays. We expect 3 chunks.
+        assert len(result) == 3
+
+    def test_convergence_chain_of_tiny_chunks(self):
+        """A chain of tiny chunks all merge in sequence until stable."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 5),
+            self._make_chunk("m1::A::p2", 5),
+            self._make_chunk("m1::A::p3", 5),
+            self._make_chunk("m1::A::p4", 5),
+            self._make_chunk("m1::A::p5", 300),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        # All four 5-word chunks should eventually cascade-merge into the
+        # 300-word chunk, leaving a single chunk
+        assert len(result) == 1
+        # The surviving chunk should contain text from the first tiny chunk
+        assert "word0" in result[0].text
+        # And text from the 300-word chunk
+        assert "word299" in result[0].text
+
+    def test_empty_list_returns_empty(self):
+        """An empty chunk list returns an empty list."""
+        result = merge_small_across_entries([], min_tokens=200)
+        assert result == []
+
+    def test_absorbing_chunk_keeps_its_own_metadata(self):
+        """When a tiny chunk is absorbed, the absorbing chunk keeps its own metadata."""
+        tiny = Chunk(
+            chunk_id="m1::A::p1",
+            manual_id="m1",
+            text="tiny text",
+            metadata={"level1_id": "A", "procedure_name": "Tiny Proc"},
+        )
+        big = Chunk(
+            chunk_id="m1::A::p2",
+            manual_id="m1",
+            text=" ".join(f"w{i}" for i in range(300)),
+            metadata={"level1_id": "A", "procedure_name": "Big Proc"},
+        )
+        result = merge_small_across_entries([tiny, big], min_tokens=200)
+        assert len(result) == 1
+        assert result[0].metadata["procedure_name"] == "Big Proc"
+        assert result[0].chunk_id == "m1::A::p2"
+
+    def test_all_large_chunks_unchanged(self):
+        """Chunks all above min_tokens pass through unchanged."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 300),
+            self._make_chunk("m1::A::p2", 400),
+            self._make_chunk("m1::A::p3", 500),
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200)
+        assert len(result) == 3
 
 
 # ── Rule R7: Cross-Ref Merge ──────────────────────────────────────
