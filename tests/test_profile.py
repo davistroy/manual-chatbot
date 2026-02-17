@@ -155,6 +155,62 @@ class TestLoadProfileHierarchy:
                 assert isinstance(level.id_pattern, str)
 
 
+class TestLoadProfileBoundaryFilters:
+    """Test boundary filter configuration loading from profiles."""
+
+    def test_xj_level3_has_min_gap_lines(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]  # level 3 = procedure
+        assert level3.min_gap_lines == 2
+
+    def test_xj_level3_has_min_content_words(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]
+        assert level3.min_content_words == 5
+
+    def test_xj_level3_has_require_blank_before(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level3 = profile.hierarchy[2]
+        assert level3.require_blank_before is True
+
+    def test_level_without_filters_defaults_min_gap_lines(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]  # level 1 = group, no filter fields in YAML
+        assert level1.min_gap_lines == 0
+
+    def test_level_without_filters_defaults_min_content_words(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]
+        assert level1.min_content_words == 0
+
+    def test_level_without_filters_defaults_require_blank_before(self, xj_profile_path: Path):
+        profile = load_profile(xj_profile_path)
+        level1 = profile.hierarchy[0]
+        assert level1.require_blank_before is False
+
+    def test_cj_levels_all_default_filters(self, cj_profile_path: Path):
+        """CJ profile has no filter fields — all levels should use defaults."""
+        profile = load_profile(cj_profile_path)
+        for level in profile.hierarchy:
+            assert level.min_gap_lines == 0
+            assert level.min_content_words == 0
+            assert level.require_blank_before is False
+
+    def test_tm9_levels_all_default_filters(self, tm9_profile_path: Path):
+        """TM9 profile has no filter fields — all levels should use defaults."""
+        profile = load_profile(tm9_profile_path)
+        for level in profile.hierarchy:
+            assert level.min_gap_lines == 0
+            assert level.min_content_words == 0
+            assert level.require_blank_before is False
+
+    def test_profile_with_filters_still_validates(self, xj_profile_path: Path):
+        """Profile with boundary filter fields should pass validation."""
+        profile = load_profile(xj_profile_path)
+        errors = validate_profile(profile)
+        assert errors == []
+
+
 class TestLoadProfileSafetyCallouts:
     """Test safety callout loading from profiles."""
 

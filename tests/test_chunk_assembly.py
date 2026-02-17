@@ -535,6 +535,63 @@ class TestCrossEntryMerge:
         result = merge_small_across_entries(chunks, min_tokens=200)
         assert len(result) == 3
 
+    def test_merge_blocked_when_combined_exceeds_max_tokens(self):
+        """A small chunk should NOT merge into a large sibling if the result exceeds max_tokens."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 150),   # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 1900),   # large — 150+1900 = 2050 > 2000
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=2000)
+        assert len(result) == 2, (
+            "Merge should be blocked because combined size (2050) exceeds max_tokens (2000)"
+        )
+
+    def test_merge_succeeds_when_combined_within_max_tokens(self):
+        """A small chunk should merge into the next sibling when combined size is within limit."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 150),   # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 800),   # combined = 150 + 800 = 950 < 2000
+        ]
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=2000)
+        assert len(result) == 1, (
+            "Merge should succeed because combined size (950) is within max_tokens (2000)"
+        )
+        # The surviving chunk should contain text from both
+        assert "word0" in result[0].text
+        assert "word799" in result[0].text
+
+    def test_custom_max_tokens_respected(self):
+        """A custom max_tokens value (lower than default) should be respected."""
+        chunks = [
+            self._make_chunk("m1::A::p1", 50),    # tiny — below min_tokens
+            self._make_chunk("m1::A::p2", 400),   # combined = 50 + 400 = 450 > 300
+        ]
+        # With max_tokens=300, the merge should be blocked
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=300)
+        assert len(result) == 2, (
+            "Custom max_tokens=300 should block merge of combined 450 words"
+        )
+
+        # With max_tokens=500, the merge should succeed
+        result2 = merge_small_across_entries(chunks, min_tokens=200, max_tokens=500)
+        assert len(result2) == 1, (
+            "Custom max_tokens=500 should allow merge of combined 450 words"
+        )
+
+    def test_max_tokens_boundary_exact_limit(self):
+        """A merge producing exactly max_tokens words should be allowed (<=, not <)."""
+        # We need to be precise: the combined text includes "\n\n" separator
+        # which doesn't add words. Build chunks so combined word count == max_tokens.
+        chunks = [
+            self._make_chunk("m1::A::p1", 100),
+            self._make_chunk("m1::A::p2", 400),
+        ]
+        # Combined text: 100 words + "\n\n" + 400 words = 500 words
+        result = merge_small_across_entries(chunks, min_tokens=200, max_tokens=500)
+        assert len(result) == 1, (
+            "Merge at exactly max_tokens boundary should be allowed"
+        )
+
 
 # ── Rule R7: Cross-Ref Merge ──────────────────────────────────────
 

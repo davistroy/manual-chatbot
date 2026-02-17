@@ -20,6 +20,9 @@ class HierarchyLevel:
     id_pattern: str | None
     title_pattern: str | None
     known_ids: list[dict[str, str]] = field(default_factory=list)
+    min_gap_lines: int = 0          # 0 = disabled
+    min_content_words: int = 0      # 0 = disabled
+    require_blank_before: bool = False
 
 
 @dataclass
@@ -201,6 +204,9 @@ def load_profile(path: str | Path) -> ManualProfile:
                 id_pattern=h.get("id_pattern"),
                 title_pattern=h.get("title_pattern"),
                 known_ids=h.get("known_ids", []),
+                min_gap_lines=h.get("min_gap_lines", 0),
+                min_content_words=h.get("min_content_words", 0),
+                require_blank_before=h.get("require_blank_before", False),
             )
         )
 

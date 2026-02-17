@@ -47,6 +47,9 @@ structure:
       name: "procedure"
       id_pattern: null
       title_pattern: "^([A-Z]{2,}(?:\\s+[A-Z/\\-\\(\\) ]{2,})+)$"
+      min_gap_lines: 2
+      min_content_words: 5
+      require_blank_before: true
     - level: 4
       name: "sub-procedure"
       id_pattern: null

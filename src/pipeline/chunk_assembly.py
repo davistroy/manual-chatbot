@@ -649,21 +649,23 @@ def _extract_level1_id(chunk: Chunk) -> str:
 
 
 def merge_small_across_entries(
-    chunks: list[Chunk], min_tokens: int = 200
+    chunks: list[Chunk], min_tokens: int = 200, max_tokens: int = 2000
 ) -> list[Chunk]:
     """Post-assembly merge pass: absorb tiny chunks into their next sibling.
 
     Iterates the full chunk list left to right.  For each chunk whose token
     count is below *min_tokens*, the chunk's text is prepended to the next
     chunk **if** both chunks share the same level-1 group (extracted from
-    ``chunk_id``).  The absorbing chunk keeps its own metadata; the tiny
-    chunk is dropped.
+    ``chunk_id``) **and** the combined size does not exceed *max_tokens*.
 
     Runs multiple passes (up to 10) until no further merges occur so that
     chains of tiny chunks collapse fully.
 
     Returns a new list — the input list is not mutated.
     """
+    # Threshold tuning: min_tokens=200 catches most tiny chunks,
+    # max_tokens=2000 prevents oversized merged chunks.
+    # Tuned against XJ 1999 service manual output.
     if not chunks:
         return []
 
@@ -683,16 +685,18 @@ def merge_small_across_entries(
                 next_l1 = _extract_level1_id(next_chunk)
 
                 if current_l1 == next_l1:
-                    # Prepend current text to next chunk; next chunk keeps its metadata
                     combined_text = current.text + "\n\n" + next_chunk.text
-                    working[i + 1] = Chunk(
-                        chunk_id=next_chunk.chunk_id,
-                        manual_id=next_chunk.manual_id,
-                        text=combined_text,
-                        metadata=next_chunk.metadata,
-                    )
-                    i += 1
-                    continue
+                    # Guard: don't merge if the result would exceed max_tokens
+                    if count_tokens(combined_text) <= max_tokens:
+                        # Prepend current text to next chunk; next chunk keeps its metadata
+                        working[i + 1] = Chunk(
+                            chunk_id=next_chunk.chunk_id,
+                            manual_id=next_chunk.manual_id,
+                            text=combined_text,
+                            metadata=next_chunk.metadata,
+                        )
+                        i += 1
+                        continue
 
             merged.append(current)
             i += 1
