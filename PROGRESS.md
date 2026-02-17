@@ -65,9 +65,17 @@
 | 2026-02-17 | Phase 7.2: Validate TM9-8014 pipeline against real PDF | src/pipeline/profile.py, src/pipeline/qa.py, schema/manual_profile_v1.schema.json, profiles/tm9-8014.yaml | 83 chunks, 0 errors. Added cross_ref_unresolved_severity field |
 | 2026-02-17 | Phase 8.2: Create TM9-8015-1 profile and validate | profiles/tm9-8015-1.yaml (new), tests/test_profile.py | 64 chunks, 0 errors, 58 warnings. Poorest OCR, 35 OCR subs, 19 regression tests |
 
+### Multi-Manual Regression Suite (Implementation Plan v4, Phase 9)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 9.1: Profile discovery test | tests/test_profile.py | 10 parametrized invariant checks across all 5 profiles (50 test cases) |
+| 2026-02-17 | Phase 9.2: CLI validation report grouping | src/pipeline/cli.py, tests/test_cli.py | `--summary-only` flag, `_format_validation_summary()`, 10 new tests |
+| 2026-02-17 | Phase 9.3: Documentation finalization | CLAUDE.md, PROGRESS.md, LEARNINGS.md, IMPLEMENTATION_PLAN.md | All docs updated to final state |
+
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests), plus 5 production profiles created and validated (XJ-1999, CJ universal, TM9-8014, TM9-8015-2, TM9-8015-1). All 5 manuals QA-passing. Full test suite: **522 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus multi-manual extension (Phases 5-9: 15 work items, all complete). 5 production profiles created and validated (XJ-1999, CJ universal, TM9-8014, TM9-8015-2, TM9-8015-1). All 5 manuals QA-passing. Phase 9 added profile discovery tests (10 parametrized invariants across all profiles), CLI validation summary grouping with `--summary-only` flag, and documentation finalization. Full test suite: **582 tests passing** (607 collected, 25 integration-deselected; up from 250 baseline).
 
 ### Output Quality Results (XJ 1999 Service Manual)
 
@@ -109,12 +117,12 @@ The chunking pipeline now processes 5 vehicle service manuals from 3 distinct do
 | Output quality (Phases 1-4) | 2026-02-16 | known_ids, cross-ref, XJ profile | 439 |
 | Multi-manual code fixes (Phase 5) | 2026-02-17 | Partial-path, regex subs, char-spacing | 465 |
 | Production profiles (Phases 6-8) | 2026-02-17 | 4 new profiles, real-PDF validation | 522 |
-| Documentation (Phase 9.3) | 2026-02-17 | CLAUDE.md, PROGRESS.md, LEARNINGS.md | 522 |
+| Regression suite + docs (Phase 9) | 2026-02-17 | Profile discovery tests, CLI summary, docs | 582 |
 
-### What Remains
+### What Remains (Future Work)
 
-- **Phase 9.1**: Profile discovery test (parametrized test that auto-discovers all profiles in `profiles/`)
-- **Phase 9.2**: CLI validation report grouping (`--summary-only` flag)
+All 9 implementation plan phases (15 work items in Phases 5-9) are complete. Remaining work is from the original PRD and was explicitly out of scope for this implementation plan:
+
 - **PRD Phase 5**: LLM-assisted profile bootstrapping (CLI stub exists)
 - **PRD Phase 6**: Chatbot integration layer
 - **PRD 7.2**: Docker Compose deployment

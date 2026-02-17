@@ -60,3 +60,9 @@ Issues encountered and solutions discovered during implementation.
 - Content-text probe (Strategy 5) added to the cross-ref checker: when a cross-ref target is not found as a chunk ID or boundary, the resolver now searches for the target string in chunk text content. This catches merged paragraphs where the paragraph number appears inline but was not detected as a structural boundary
 - TM9-8015-1 had the poorest OCR quality of all 5 manuals, requiring 35 literal OCR substitutions and 9 regex substitutions. Roman numeral chapter headings were frequently garbled (e.g., "Xl" for "XI"), necessitating OCR-variant known_ids. Despite the quality, pipeline achieved 64 chunks with 0 errors and 58 warnings
 - 522 tests pass after all 5 production profiles validated and complete
+
+## Regression Suite and Documentation Round (2026-02-17)
+
+- Parametrized profile discovery tests (`TestProfileDiscoveryInvariants`) are the best way to ensure new profiles don't break common invariants. Auto-discovery via glob means adding a new YAML file to `profiles/` immediately includes it in the test suite with zero manual registration
+- CLI validation summary grouping (`_format_validation_summary`) makes multi-manual QA workflows practical. Without it, hundreds of individual warnings obscure the pass/fail result. The `--summary-only` flag makes CI/CD integration clean
+- 582 tests pass after all 9 phases complete (607 collected, 25 integration-deselected)
