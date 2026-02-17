@@ -1,526 +1,596 @@
-# Implementation Plan: Output Quality — Phase 2
+# Implementation Plan: Multi-Manual Pipeline
 
-**Generated:** 2026-02-16
-**Based On:** RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md
+**Generated:** 2026-02-16 (Phases 1-4), 2026-02-17 (Phases 5-9)
+**Based On:** RECOMMENDATIONS.md + FINDINGS.md
 **Supersedes:** Previous IMPLEMENTATION_PLAN.md (Phase 1-3 remediation — complete, 349 tests passing)
-**Total Phases:** 4
-**Estimated Total Effort:** ~100K tokens
+**Total Phases:** 9
+**Estimated Total Effort:** ~350K tokens
 
 ---
 
 ## Plan Overview
 
-This plan addresses the four remaining output quality issues identified by running the 1,948-page XJ service manual through the pipeline. The previous three-phase implementation (skip list, metadata enrichment, boundary filtering, cross-entry merge) is complete with 349 tests passing. This plan builds on that foundation to reach QA-passing output quality.
+This plan has two eras. **Phases 1-4** (completed) addressed XJ output quality — the pipeline now processes the 1,948-page XJ service manual with QA passing (0 errors, 2,137 chunks, 439 tests). **Phases 5-9** (new) extend the pipeline to the CJ Universal and military TM manual families, fixing cross-cutting code issues discovered during multi-manual validation and creating production profiles for 4 additional manuals.
 
-**Strategy:** Phase 1 adds the mandatory known_ids filter (schema + code). Phase 2 creates the production XJ profile with complete configuration. Phase 3 fixes the cross-reference namespace mismatch. Phase 4 validates end-to-end and tunes iteratively. Phases 1 and 3 are independent and can run in parallel. Phase 2 depends on Phase 1. Phase 4 depends on all prior phases.
+**Strategy:** Phase 5 fixes pipeline code bugs that affect all manuals (cross-ref resolution, regex substitutions, character-spacing collapse). Phases 6-7 create production profiles for the two existing test-fixture manuals (CJ, TM9-8014). Phase 8 onboards two new manuals (TM9-8015-2, TM9-8015-1). Phase 9 adds a multi-manual regression suite to prevent future regressions.
 
-**Validation approach:** After Phase 4, re-run the full XJ pipeline and confirm:
-- L1 boundaries drop from ~2,748 to ~55
-- L3 boundaries increase from 82 to 500+
-- Cross-ref errors drop from 113 to 0
-- known_ids warnings drop from 1,716 to <20
-- QA passed: True
+**Validation approach:** After each profile phase (6-8), run the full pipeline against the real PDF and confirm QA passes.
 
 ### Phase Summary Table
 
-| Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies |
-|-------|------------|------------------|-------------|--------------|
-| 1 | Mandatory known_ids filter | Schema field, dataclass field, filter pass, 5 tests | ~25K | None |
-| 2 | Production XJ profile | Complete profile YAML, L2/L3/L4 patterns, profile regression test | ~30K | Phase 1 |
-| 3 | Cross-ref namespace fix | Qualify refs, downgrade skip_section refs, 5 tests | ~20K | None |
-| 4 | End-to-end validation | Pipeline run, metric comparison, iterative tuning | ~25K | Phases 1-3 |
+| Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies | Status |
+|-------|------------|------------------|-------------|--------------|--------|
+| 1 | Mandatory known_ids filter | Schema field, dataclass field, filter pass, 5 tests | ~25K | None | **Complete** |
+| 2 | Production XJ profile | Complete profile YAML, L2/L3/L4 patterns, profile regression test | ~30K | Phase 1 | **Complete** |
+| 3 | Cross-ref namespace fix | Qualify refs, downgrade skip_section refs, 5 tests | ~20K | None | **Complete** |
+| 4 | End-to-end XJ validation | Pipeline run, metric comparison, iterative tuning | ~25K | Phases 1-3 | **Complete** |
+| 5 | Pipeline code fixes | Cross-ref partial-path, regex subs, char-spacing collapse, logging | ~60K | None | Pending |
+| 6 | Production CJ profile | Complete 25-section profile, validation, regression test | ~50K | Phase 5 | Pending |
+| 7 | Production TM9-8014 profile | Expanded subs, L4 removal, synthetic chapters, validation | ~50K | Phase 5 | Pending |
+| 8 | New manual profiles | TM9-8015-2 + TM9-8015-1 profiles, validation runs | ~60K | Phases 5, 7 | Pending |
+| 9 | Multi-manual regression suite | Profile regression tests, CLI report enhancement | ~30K | Phases 6-8 | Pending |
 
 ---
 
-## Phase 1: Mandatory known_ids Filter
+## Phase 1: Mandatory known_ids Filter [COMPLETE]
 
-**Estimated Effort:** ~25,000 tokens (including testing/fixes)
-**Dependencies:** None
-**Parallelizable:** Yes — can run concurrently with Phase 3
+*Completed 2026-02-16. See PROGRESS.md for details. 5 new tests, 439 total passing.*
+
+---
+
+## Phase 2: Production XJ Profile [COMPLETE]
+
+*Completed 2026-02-16. See PROGRESS.md for details. 6 new tests, 439 total passing.*
+
+---
+
+## Phase 3: Cross-Reference Namespace Fix [COMPLETE]
+
+*Completed 2026-02-16. See PROGRESS.md for details. 5 new tests, 439 total passing.*
+
+---
+
+## Phase 4: End-to-End XJ Validation [COMPLETE]
+
+*Completed 2026-02-16. XJ QA passes: 0 errors, 2,137 chunks, 5 cross-ref warnings (8W skipped). See PROGRESS.md.*
+
+---
+
+<!-- Appended on 2026-02-17 from /plan-improvements based on FINDINGS.md -->
+
+## Phase 5: Pipeline Code Fixes for Multi-Manual Support
+
+**Estimated Effort:** ~60,000 tokens (including testing/fixes)
+**Dependencies:** None (Phases 1-4 are complete)
+**Parallelizable:** Yes — work items 5.1, 5.2, 5.3 are independent
 
 ### Goals
-- Add `require_known_id` support to the profile schema, dataclass, and boundary filter
-- When enabled, L1 boundaries with unrecognized IDs are dropped during `filter_boundaries()`
-- Zero behavior change for existing profiles and tests
+- Fix cross-reference resolution for hierarchical chunk IDs (eliminates 342 TM9-8014 errors)
+- Add regex-based OCR substitution support (enables pattern-based cleanup for all manuals)
+- Add character-spacing collapse pre-processor (fixes CJ false-positive root cause)
+- Add per-pass filter logging for debugging
 
 ### Work Items
 
-#### 1.1 Schema: Add `require_known_id` Property
+#### 5.1 Cross-Reference Partial-Path Matching
 
 **Recommendation Ref:** Q1
-**Files Affected:** `schema/manual_profile_v1.schema.json`
+**Files Affected:** `src/pipeline/qa.py`, `tests/test_qa.py`
 
 **Description:**
-Add `require_known_id` boolean property to the hierarchy level item in the JSON Schema, with `default: false`.
-
-**Acceptance Criteria:**
-- [ ] Property appears in hierarchy level item properties
-- [ ] Default is `false`
-- [ ] Description explains behavior
-- [ ] Existing profiles validate without changes
-
----
-
-#### 1.2 Dataclass: Add Field to `HierarchyLevel`
-
-**Recommendation Ref:** Q1
-**Files Affected:** `src/pipeline/profile.py`
-
-**Description:**
-Add `require_known_id: bool = False` field to the `HierarchyLevel` dataclass. Update the hierarchy parsing in `load_profile()` to read this field from the YAML dict.
-
-**Acceptance Criteria:**
-- [ ] Field exists on `HierarchyLevel` with default `False`
-- [ ] `load_profile()` reads `require_known_id` from YAML
-- [ ] Existing profiles load without changes (field defaults to `False`)
-
----
-
-#### 1.3 Parser: Enforce in `filter_boundaries()`
-
-**Recommendation Ref:** Q1
-**Files Affected:** `src/pipeline/structural_parser.py`
-
-**Description:**
-Add Pass 0 to `filter_boundaries()` — before the existing blank-line, gap, and content-words passes. For levels where `require_known_id` is `True` and `known_ids` is non-empty, reject any boundary whose extracted ID is not in the known set. Boundaries with `id=None` are also rejected.
+Add a fourth resolution strategy to `check_cross_ref_validity()` at line ~280. Currently the function checks: (1) exact chunk ID match, (2) exact prefix match, (3) string-prefix match (any prefix starts with ref). Add: (4) **suffix-segment match** — extract the segment after the last `::` in the reference (e.g., `69` from `tm9-8014-m38a1::69`), then check if any chunk ID contains `::69::` or ends with `::69`.
 
 ```python
-# --- Pass 0: require_known_id ---
-known_id_sets: dict[int, set[str]] = {}
-for h in profile.hierarchy:
-    if h.require_known_id and h.known_ids:
-        known_id_sets[h.level] = {entry["id"] for entry in h.known_ids}
-
-if known_id_sets:
-    filtered = []
-    for b in boundaries:
-        if b.level in known_id_sets:
-            if b.id is None or b.id not in known_id_sets[b.level]:
-                continue  # rejected: ID not in known set
-        filtered.append(b)
-    boundaries = filtered
+# Strategy 4: suffix-segment match
+ref_parts = ref.split("::")
+if len(ref_parts) >= 2:
+    suffix = ref_parts[-1]
+    segment_pattern = f"::{suffix}::"
+    segment_end = f"::{suffix}"
+    if any(segment_pattern in cid or cid.endswith(segment_end) for cid in all_chunk_ids):
+        continue  # resolved via suffix match
 ```
 
 **Acceptance Criteria:**
-- [ ] Pass 0 runs before existing passes
-- [ ] Only affects levels with `require_known_id: True` AND non-empty `known_ids`
-- [ ] Boundaries at unaffected levels pass through untouched
-- [ ] `id=None` boundaries are rejected when filter is active
+- [ ] `tm9-8014-m38a1::69` resolves when chunk `tm9-8014-m38a1::1::IV::69` exists
+- [ ] `tm9-8014-m38a1::69` does NOT match `tm9-8014-m38a1::1::IV::169`
+- [ ] `tm9-8014-m38a1::69` does NOT match `tm9-8014-m38a1::1::IV::690`
+- [ ] XJ cross-refs still resolve via existing strategies (no regression)
+- [ ] 4 new tests added
 
 ---
 
-#### 1.4 Tests
+#### 5.2 Regex-Based OCR Substitution Support
 
-**Recommendation Ref:** Q1
-**Files Affected:** `tests/test_structural_parser.py`
+**Recommendation Ref:** Q2
+**Files Affected:** `src/pipeline/profile.py`, `src/pipeline/ocr_cleanup.py`, `schema/manual_profile_v1.schema.json`, `tests/test_ocr_cleanup.py`, `tests/test_profile.py`
 
 **Description:**
-Add `TestRequireKnownId` test class with 5 tests:
 
-1. `test_require_known_id_rejects_unknown` — profile with `require_known_id: true` and known_ids `["7", "9"]`. Boundaries with IDs `"7"`, `"9"`, `"42"`, `"1999"`. Assert only `"7"` and `"9"` survive.
-2. `test_require_known_id_false_passes_all` — same boundaries, `require_known_id: false`. All pass.
-3. `test_require_known_id_empty_known_ids_passes_all` — `require_known_id: true`, empty `known_ids`. All pass (guard clause).
-4. `test_require_known_id_none_id_rejected` — boundary with `id=None`, `require_known_id: true`. Rejected.
-5. `test_require_known_id_only_affects_configured_level` — L1 has `require_known_id: true`, L2 does not. L2 boundaries pass through.
+**5.2a: Schema + Dataclass**
+Add `regex_substitutions` to `OcrCleanupConfig`:
+```python
+@dataclass
+class OcrCleanupConfig:
+    quality_estimate: str = ""
+    known_substitutions: list[dict[str, str]] = field(default_factory=list)
+    regex_substitutions: list[dict[str, str]] = field(default_factory=list)  # NEW
+    header_footer_patterns: list[str] = field(default_factory=list)
+    garbage_detection: GarbageDetectionConfig = field(default_factory=GarbageDetectionConfig)
+```
+
+Each entry has `{pattern: str, replacement: str}`. Update `load_profile()` to read the field. Update `validate_profile()` to compile-check patterns with `re.compile()`.
+
+Update JSON Schema to add `regex_substitutions` array with items having `pattern` and `replacement` string properties.
+
+**5.2b: Apply Function**
+Add `apply_regex_substitutions()` to `ocr_cleanup.py`:
+```python
+def apply_regex_substitutions(
+    text: str,
+    substitutions: list[dict[str, str]],
+) -> str:
+    for sub in substitutions:
+        text = re.sub(sub["pattern"], sub["replacement"], text)
+    return text
+```
+
+Call it in `clean_page()` AFTER `apply_known_substitutions()` and BEFORE `strip_headers_footers()`.
 
 **Acceptance Criteria:**
-- [ ] All 5 new tests pass
-- [ ] All 349 existing tests still pass
+- [ ] `OcrCleanupConfig.regex_substitutions` field exists with empty list default
+- [ ] `load_profile()` reads `regex_substitutions` from YAML
+- [ ] `validate_profile()` compile-checks each pattern
+- [ ] Invalid regex raises `ValueError` during profile validation
+- [ ] `apply_regex_substitutions()` applies patterns in order
+- [ ] Existing profiles without `regex_substitutions` load unchanged
+- [ ] 5 new tests added
 
 ---
 
-### Phase 1 Testing Requirements
-- [ ] Schema validates profiles with the new field
-- [ ] Existing test suite passes (349 tests) — `require_known_id` defaults to `false`
-- [ ] 5 new unit tests pass
+#### 5.3 Character-Spacing Collapse
+
+**Recommendation Ref:** Q3
+**Files Affected:** `src/pipeline/profile.py`, `src/pipeline/ocr_cleanup.py`, `schema/manual_profile_v1.schema.json`, `tests/test_ocr_cleanup.py`
+
+**Description:**
+Add `collapse_spaced_chars: bool = False` to `OcrCleanupConfig`. Implement a function in `ocr_cleanup.py`:
+
+```python
+def collapse_spaced_characters(text: str) -> str:
+    """Collapse 'H U R R I C A N E' to 'HURRICANE'.
+
+    Matches sequences of 3+ single uppercase characters separated by
+    single spaces. Preserves surrounding whitespace/punctuation.
+    """
+    def _collapse(match: re.Match) -> str:
+        return match.group(0).replace(" ", "")
+
+    return re.sub(r'\b([A-Z] ){2,}[A-Z]\b', _collapse, text)
+```
+
+Call in `clean_page()` as the FIRST step when `profile.ocr_cleanup.collapse_spaced_chars` is True — before literal and regex substitutions.
+
+**Acceptance Criteria:**
+- [ ] `H U R R I C A N E` → `HURRICANE`
+- [ ] `F I G . D - 1 4` → `FIG. D-14` (preserves punctuation between collapsed segments)
+- [ ] `A description` NOT collapsed (only 1 single-char, need 3+)
+- [ ] `I V` NOT collapsed (only 2 chars — below threshold)
+- [ ] Disabled by default (`collapse_spaced_chars: false`)
+- [ ] 4 new tests added
+
+---
+
+#### 5.4 Per-Pass Filter Logging
+
+**Recommendation Ref:** A2
+**Files Affected:** `src/pipeline/structural_parser.py`
+
+**Description:**
+Add `logger.info()` calls after each pass in `filter_boundaries()`:
+```python
+logger.info("Pass 0 (known_id): %d -> %d boundaries", before_count, len(boundaries))
+logger.info("Pass 1 (blank_before): %d -> %d boundaries", before_count, len(boundaries))
+logger.info("Pass 2 (min_gap): %d -> %d boundaries", before_count, len(boundaries))
+logger.info("Pass 3 (min_words): %d -> %d boundaries", before_count, len(boundaries))
+```
+
+**Acceptance Criteria:**
+- [ ] Each pass logs before/after count at INFO level
+- [ ] Zero behavioral change
+- [ ] No new tests needed (logging only)
+
+---
+
+### Phase 5 Testing Requirements
+- [ ] 13 new tests total (4 cross-ref + 5 regex sub + 4 char-spacing)
+- [ ] All 439 existing tests still pass
 - [ ] `pytest -v --tb=short` — all green
 
-### Phase 1 Completion Checklist
-- [ ] All work items complete (1.1-1.4)
-- [ ] Tests passing (354 total)
-- [ ] No regressions introduced
+### Phase 5 Completion Checklist
+- [ ] Cross-ref partial-path matching works for hierarchical IDs (5.1)
+- [ ] Regex substitutions supported in profiles (5.2)
+- [ ] Character-spacing collapse available as opt-in (5.3)
+- [ ] Per-pass filter logging added (5.4)
+- [ ] Tests passing (expected: 452+)
 
 ---
 
-## Phase 2: Production XJ Profile
+## Phase 6: Production CJ Universal Profile
 
-**Estimated Effort:** ~30,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (need `require_known_id` field)
-**Parallelizable:** No — sequential with Phase 1
+**Estimated Effort:** ~50,000 tokens (including validation and tuning)
+**Dependencies:** Phase 5 (needs regex subs and char-spacing collapse)
+**Parallelizable:** Yes — can run concurrently with Phase 7
 
 ### Goals
-- Create `profiles/xj-1999.yaml` with complete known_ids, tuned patterns, and relaxed L3 filters
-- Keep test fixture `tests/fixtures/xj_1999_profile.yaml` unchanged
+- Create `profiles/cj-universal.yaml` with complete known_ids and filtering
+- Achieve QA-passing pipeline output for the 376-page CJ service manual
 - Add profile regression test
 
 ### Work Items
 
-#### 2.1 Create Production Profile
+#### 6.1 Create Production CJ Profile
 
-**Recommendation Ref:** Q2, Q5
-**Files Affected:** `profiles/xj-1999.yaml` (new)
+**Recommendation Ref:** P1, P3
+**Files Affected:** `profiles/cj-universal.yaml` (new)
 
 **Description:**
-Copy from `tests/fixtures/xj_1999_profile.yaml` and apply all changes:
+Create production profile with:
 
-1. **Complete known_ids list** (~39 groups from XJ Tab Locator):
+1. **Complete known_ids** (25 sections from manual TOC):
    ```yaml
    known_ids:
-     - { id: "IN", title: "Introduction" }
-     - { id: "0", title: "Lubrication and Maintenance" }
-     - { id: "2", title: "Suspension" }
-     - { id: "3", title: "Differential and Driveline" }
-     - { id: "5", title: "Brakes" }
-     - { id: "6", title: "Clutch" }
-     - { id: "7", title: "Cooling System" }
-     - { id: "8A", title: "Battery" }
-     - { id: "8B", title: "Starting System" }
-     - { id: "8C", title: "Charging System" }
-     - { id: "8D", title: "Ignition System" }
-     - { id: "8E", title: "Instrument Panel Systems" }
-     - { id: "8F", title: "Audio Systems" }
-     - { id: "8G", title: "Horn Systems" }
-     - { id: "8H", title: "Vehicle Speed Control System" }
-     - { id: "8J", title: "Turn Signal and Hazard Warning Systems" }
-     - { id: "8K", title: "Wiper and Washer Systems" }
-     - { id: "8L", title: "Lamps" }
-     - { id: "8M", title: "Passive Restraint Systems" }
-     - { id: "8N", title: "Electrically Heated Systems" }
-     - { id: "8O", title: "Power Distribution Systems" }
-     - { id: "8P", title: "Power Lock Systems" }
-     - { id: "8Q", title: "Vehicle Theft/Security Systems" }
-     - { id: "8R", title: "Power Seats Systems" }
-     - { id: "8S", title: "Power Window Systems" }
-     - { id: "8T", title: "Power Mirror Systems" }
-     - { id: "8U", title: "Chime/Buzzer Warning Systems" }
-     - { id: "8V", title: "Overhead Console Systems" }
-     - { id: "8W", title: "Wiring Diagrams" }
-     - { id: "9", title: "Engine" }
-     - { id: "11", title: "Exhaust System and Intake Manifold" }
-     - { id: "13", title: "Frame and Bumpers" }
-     - { id: "14", title: "Fuel System" }
-     - { id: "19", title: "Steering" }
-     - { id: "21", title: "Transmission and Transfer Case" }
-     - { id: "22", title: "Tires and Wheels" }
-     - { id: "23", title: "Body" }
-     - { id: "24", title: "Heating and Air Conditioning" }
-     - { id: "25", title: "Emission Control Systems" }
+     - { id: "A", title: "General Data" }
+     - { id: "B", title: "Lubrication" }
+     - { id: "C", title: "Tune-Up" }
+     - { id: "D", title: "Hurricane F4 Engine" }
+     - { id: "D1", title: "Dauntless V-6 Engine" }
+     - { id: "E", title: "Fuel System" }
+     - { id: "F", title: "Exhaust System" }
+     - { id: "F1", title: "Exhaust Emission Control (F4)" }
+     - { id: "F2", title: "Exhaust Emission Control (V6)" }
+     - { id: "G", title: "Cooling System" }
+     - { id: "H", title: "Electrical" }
+     - { id: "I", title: "Clutch" }
+     - { id: "J", title: "3-Speed Transmission" }
+     - { id: "J1", title: "4-Speed Transmission" }
+     - { id: "K", title: "Transfer Case" }
+     - { id: "L", title: "Propeller Shafts" }
+     - { id: "M", title: "Front Axle" }
+     - { id: "N", title: "Rear Axle" }
+     - { id: "O", title: "Steering" }
+     - { id: "P", title: "Brakes" }
+     - { id: "Q", title: "Wheels" }
+     - { id: "R", title: "Frame" }
+     - { id: "S", title: "Springs and Shock Absorbers" }
+     - { id: "T", title: "Body" }
+     - { id: "U", title: "Miscellaneous" }
    ```
 
-2. **Set `require_known_id: true`** on L1 hierarchy level.
-
-3. **L2 pattern — add negative lookahead** for procedure keywords:
-   ```yaml
-   id_pattern: "^(?!REMOVAL|INSTALLATION|REMOVAL AND INSTALLATION|DIAGNOSIS|DIAGNOSIS AND TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY|ASSEMBLY|DISASSEMBLY AND ASSEMBLY|CLEANING|INSPECTION|CLEANING AND INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|TESTING|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
-   ```
-
-4. **L3 pattern — closed vocabulary**:
-   ```yaml
-   title_pattern: "^(REMOVAL AND INSTALLATION|REMOVAL|INSTALLATION|DIAGNOSIS AND TESTING|DIAGNOSIS|TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY AND ASSEMBLY|DISASSEMBLY|ASSEMBLY|CLEANING AND INSPECTION|CLEANING|INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)$"
-   min_gap_lines: 0
-   min_content_words: 3
-   require_blank_before: false
-   ```
-
-5. **L4 pattern — broader component matching**:
-   ```yaml
-   title_pattern: "^([A-Z][A-Z][A-Z \\-/]{1,}(?:\\([A-Z0-9\\. ]+\\))?)$"
-   min_content_words: 3
-   ```
+2. **Updated L1 id_pattern:** `^([A-Z]\d?)\s` to capture compound IDs (D1, F1, F2, J1)
+3. **`require_known_id: true`** on L1
+4. **`collapse_spaced_chars: true`** in ocr_cleanup
+5. **No L4 level** (per P3 — step_patterns handle `a.`, `b.` without creating boundaries)
+6. **Regex substitutions** for remaining OCR artifacts
+7. **L2 filtering:** `min_content_words: 50`, `require_blank_before: true`
+8. **Updated header pattern:** Remove overly broad `^[A-Z]\s+[A-Z ]+$`
 
 **Acceptance Criteria:**
 - [ ] Profile passes schema validation
-- [ ] All regex patterns compile without error
-- [ ] known_ids count >= 35
-- [ ] `require_known_id: true` is set on L1
-
----
-
-#### 2.2 Add Profile Regression Test
-
-**Recommendation Ref:** D2
-**Files Affected:** `tests/test_profile.py`
-
-**Description:**
-Add an integration test that loads `profiles/xj-1999.yaml`, validates it, compiles all regex patterns, and asserts basic invariants.
-
-**Acceptance Criteria:**
-- [ ] Production profile loads successfully
-- [ ] Profile passes `validate_profile()` with no errors
 - [ ] All regex patterns compile
-- [ ] known_ids count >= 35
-- [ ] L1 has `require_known_id: True`
-- [ ] L3 title_pattern contains "REMOVAL"
+- [ ] known_ids count = 25
+- [ ] `require_known_id: true` on L1
+- [ ] `collapse_spaced_chars: true`
 
 ---
 
-### Phase 2 Testing Requirements
-- [ ] Production profile loads and validates
-- [ ] Regression test passes
-- [ ] All 354+ existing tests still pass
-- [ ] Profile is ready for end-to-end validation in Phase 4
+#### 6.2 Validate Against Real PDF
 
-### Phase 2 Completion Checklist
-- [ ] `profiles/xj-1999.yaml` created
-- [ ] Profile regression test added
-- [ ] All tests passing
-- [ ] No regressions introduced
-
----
-
-## Phase 3: Cross-Reference Namespace Fix
-
-**Estimated Effort:** ~20,000 tokens (including testing/fixes)
-**Dependencies:** None — independent of Phases 1 and 2
-**Parallelizable:** Yes — can run concurrently with Phase 1
-
-### Goals
-- Fix the 100% cross-reference validation failure caused by bare group numbers
-- Downgrade references to skipped sections from error to warning
-- Maintain backward compatibility
-
-### Work Items
-
-#### 3.1 Qualify Cross-References at Creation Time
-
-**Recommendation Ref:** Q3
-**Files Affected:** `src/pipeline/chunk_assembly.py`
-
-**Description:**
-In `enrich_chunk_metadata()`, after collecting cross-reference matches, qualify them with `{manual_id}::` prefix:
-
-```python
-# AFTER existing xref collection (line 744-748)
-manual_id = metadata.get("manual_id", "")
-if manual_id:
-    xref_matches = [f"{manual_id}::{ref}" for ref in xref_matches]
-metadata["cross_references"] = sorted(set(xref_matches))
-```
-
-**Acceptance Criteria:**
-- [ ] Cross-references include `{manual_id}::` prefix
-- [ ] Empty `manual_id` falls back to bare references (no crash)
-- [ ] Deduplication still works after qualification
-
----
-
-#### 3.2 Downgrade Skip-Section References to Warning
-
-**Recommendation Ref:** Q3
-**Files Affected:** `src/pipeline/qa.py`
-
-**Description:**
-Add `profile` parameter to `check_cross_ref_validity()`. When a cross-reference target matches a skipped section prefix, emit a warning instead of an error. Update `run_validation_suite()` to pass `profile`.
-
-```python
-def check_cross_ref_validity(
-    chunks: list[Chunk],
-    profile: ManualProfile | None = None,
-) -> list[ValidationIssue]:
-    # ... existing logic ...
-
-    skip_prefixes: set[str] = set()
-    if profile and profile.skip_sections:
-        manual_id = chunks[0].manual_id if chunks else ""
-        for sid in profile.skip_sections:
-            skip_prefixes.add(f"{manual_id}::{sid}")
-
-    for chunk in chunks:
-        for ref in chunk.metadata.get("cross_references", []):
-            if ref not in all_chunk_ids and ref not in all_prefixes:
-                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
-                issues.append(
-                    ValidationIssue(
-                        check="cross_ref_validity",
-                        severity="warning" if is_skipped else "error",
-                        chunk_id=chunk.chunk_id,
-                        message=f"Cross-reference target not found: '{ref}'"
-                            + (" (skipped section)" if is_skipped else ""),
-                        details={"target": ref, "skipped": is_skipped},
-                    )
-                )
-```
-
-**Acceptance Criteria:**
-- [ ] `check_cross_ref_validity()` accepts optional `profile` parameter
-- [ ] References to skipped sections produce warnings, not errors
-- [ ] References to non-skipped missing targets still produce errors
-- [ ] `run_validation_suite()` passes `profile` to the function
-- [ ] Backward compatible — `profile=None` produces errors for all unresolved refs
-
----
-
-#### 3.3 Tests
-
-**Recommendation Ref:** Q3
-**Files Affected:** `tests/test_qa.py`, `tests/test_chunk_assembly.py`
-
-**Description:**
-Add 5 tests across two files:
-
-**`tests/test_qa.py`:**
-1. `test_cross_ref_qualified_resolves` — chunk with `cross_references: ["xj-1999::7"]` and a chunk with ID starting with `xj-1999::7`. No error.
-2. `test_cross_ref_bare_id_fails` — chunk with `cross_references: ["7"]`. Error emitted.
-3. `test_cross_ref_skipped_section_is_warning` — chunk with `cross_references: ["xj-1999::8W"]`, profile with `skip_sections: ["8W"]`. Warning, not error.
-
-**`tests/test_chunk_assembly.py`:**
-4. `test_enrich_cross_refs_qualified` — text with "Refer to Group 7", profile with `manual_id: "xj-1999"`. Assert `metadata["cross_references"] == ["xj-1999::7"]`.
-5. `test_enrich_cross_refs_deduped` — text with "Refer to Group 7" twice. Assert single entry.
-
-**Acceptance Criteria:**
-- [ ] All 5 new tests pass
-- [ ] All existing cross-ref tests still pass
-- [ ] Total test count increases by 5
-
----
-
-### Phase 3 Testing Requirements
-- [ ] Cross-ref qualification tested in chunk_assembly
-- [ ] Skip-section downgrade tested in qa
-- [ ] Backward compatibility verified (profile=None)
-- [ ] All 354+ existing tests pass
-
-### Phase 3 Completion Checklist
-- [ ] Cross-refs qualified at creation time
-- [ ] Skip-section refs downgraded to warning
-- [ ] 5 new tests passing
-- [ ] No regressions introduced
-
----
-
-## Phase 4: End-to-End Validation
-
-**Estimated Effort:** ~25,000 tokens (including iterative tuning)
-**Dependencies:** Phases 1, 2, and 3 (all must be complete)
-**Parallelizable:** No — final integration validation
-
-### Goals
-- Run the full pipeline with the production profile and confirm all metrics improve
-- Iteratively tune the production profile based on results
-- Achieve QA passing status
-
-### Work Items
-
-#### 4.1 Run Pipeline
-
-**Recommendation Ref:** All
+**Recommendation Ref:** P1
 **Files Affected:** None (validation only)
 
 **Description:**
-```bash
-pipeline -v process \
-  --profile profiles/xj-1999.yaml \
-  --pdf "data/99 XJ Service Manual.pdf" \
-  --output-dir output/
-```
+Run pipeline against `data/53-71 CJ5 Service Manual.pdf`. Compare metrics against FINDINGS.md baseline.
 
-**Acceptance Criteria:**
-- [ ] Pipeline completes without errors
-
----
-
-#### 4.2 Run Validation with Diagnostics
-
-**Recommendation Ref:** All
-**Files Affected:** None (validation only)
-
-**Description:**
-```bash
-pipeline -v validate \
-  --profile profiles/xj-1999.yaml \
-  --pdf "data/99 XJ Service Manual.pdf" \
-  --diagnostics
-```
-
-**Acceptance Criteria:**
-- [ ] Validation completes
-- [ ] Diagnostics output shows improved boundary distribution
-
----
-
-#### 4.3 Compare Metrics
-
-**Recommendation Ref:** All
-
-**Description:**
-Compare pipeline output against baseline:
-
-| Metric | Before | Target |
-|--------|--------|--------|
-| Total chunks | 2,408 | 1,500-2,500 |
-| L1 boundaries | 2,748 | ~55 |
-| L2 boundaries | 3,432 | ~200-400 |
-| L3 boundaries | 82 | 500+ |
-| L4 boundaries | 53 | 200+ |
-| Undersized chunks (<100 tok) | 637 (26%) | <10% |
-| Cross-ref errors | 113 | 0 |
-| Cross-ref warnings (8W) | 0 | ~3 |
-| known_ids warnings | 1,716 | <20 |
-| False-positive boundaries (<=3 words) | 17% | <5% |
+| Metric | Baseline (FINDINGS.md) | Target |
+|--------|----------------------|--------|
+| L1 boundaries | 1,172 | ~25 |
+| Total chunks | 1,224 | 400-800 |
+| Undersized (<200 tokens) | 730 (59.6%) | <15% |
+| Cross-ref errors | 11 | 0 |
+| QA warnings | 1,406 | <50 |
 | QA passed | False | True |
 
 **Acceptance Criteria:**
-- [ ] All metrics improve or stay within acceptable range
 - [ ] QA passes (zero errors)
+- [ ] L1 boundaries within expected range
+- [ ] Chunk sizes improved significantly
 
 ---
 
-#### 4.4 Iterative Tuning
+#### 6.3 Add Profile Regression Test
 
-**Recommendation Ref:** Q2, Q5
+**Recommendation Ref:** D1
+**Files Affected:** `tests/test_profile.py`
 
 **Description:**
-After the first run, review output for:
-- Missing `a`-suffixed group variants — add to known_ids if discovered
-- L3 procedure keywords not in the closed vocabulary — add to pattern
-- L4 false positives from overly broad component pattern — tighten if needed
-- Remaining undersized chunks — identify patterns and address
+Add integration test that loads `profiles/cj-universal.yaml`, validates it, compiles patterns, asserts invariants (25 known_ids, require_known_id on L1, collapse_spaced_chars enabled).
 
 **Acceptance Criteria:**
-- [ ] All discovered variants added to profile
-- [ ] No systematic false-positive patterns remain
+- [ ] Profile loads and validates
+- [ ] known_ids count = 25
+- [ ] Compound IDs (D1, F1, F2, J1) present
+- [ ] All patterns compile
 
 ---
 
-#### 4.5 Run Full Test Suite
+### Phase 6 Completion Checklist
+- [ ] `profiles/cj-universal.yaml` created and validates
+- [ ] Pipeline produces QA-passing output for CJ manual
+- [ ] Regression test added
+- [ ] All tests passing
 
-**Recommendation Ref:** All
+---
+
+## Phase 7: Production TM9-8014 Profile
+
+**Estimated Effort:** ~50,000 tokens (including validation and tuning)
+**Dependencies:** Phase 5 (needs cross-ref partial-path matching and regex subs)
+**Parallelizable:** Yes — can run concurrently with Phase 6
+
+### Goals
+- Create `profiles/tm9-8014.yaml` with expanded OCR substitutions and filtering
+- Resolve the L4/step pattern collision
+- Achieve QA-passing pipeline output for the 391-page military operator manual
+
+### Work Items
+
+#### 7.1 Create Production TM9-8014 Profile
+
+**Recommendation Ref:** P2, P3
+**Files Affected:** `profiles/tm9-8014.yaml` (new)
 
 **Description:**
-```bash
-pytest -v --tb=short
+Create production profile with:
+
+1. **Expanded OCR substitutions:**
+   ```yaml
+   known_substitutions:
+     - { from: "TECHNIG~MANUAL", to: "TECHNICAL MANUAL" }
+     - { from: "CHAPTEIR", to: "CHAPTER" }
+     - { from: "CHAPTEa", to: "CHAPTER" }
+     - { from: "Generd", to: "General" }
+     - { from: "persomlel", to: "personnel" }
+     - { from: "AIR CWiiiER", to: "AIR CLEANER" }
+     - { from: "Znterference", to: "Interference" }
+   ```
+   Plus regex_substitutions for Z/I confusion patterns and Installation variants.
+
+2. **known_ids for all 4 chapters** with `require_known_id: true` on L1
+3. **Investigate Chapters 2 and 3** — if headings are image-only, consider page-range-based synthetic boundaries or accept them as missing
+4. **Remove L4 level entirely** (per P3 — lettered steps handled by step_patterns/R3 without creating boundaries)
+5. **L3 filtering:** `require_blank_before: true`, `min_content_words: 15`
+6. **L2 Section pattern tuned** for Roman numeral format with filtering
+
+**Acceptance Criteria:**
+- [ ] Profile passes schema validation
+- [ ] All regex patterns compile
+- [ ] 4 chapter known_ids
+- [ ] No L4 hierarchy level
+- [ ] `require_known_id: true` on L1
+
+---
+
+#### 7.2 Validate Against Real PDF
+
+**Recommendation Ref:** P2
+**Files Affected:** None (validation only)
+
+**Description:**
+Run pipeline against `data/TM9-8014.pdf`. Compare against FINDINGS.md baseline.
+
+| Metric | Baseline (FINDINGS.md) | Target |
+|--------|----------------------|--------|
+| L1 (Chapter) | 1 | 2-4 |
+| L4 (Sub-paragraph) | 334 | 0 (removed) |
+| Cross-ref errors | 342 | 0 (fixed by Phase 5.1) |
+| Orphaned step warnings | 74 | <10 |
+| Total chunks | 173 | 150-300 |
+| QA passed | False | True |
+
+**Acceptance Criteria:**
+- [ ] QA passes (zero errors)
+- [ ] Cross-ref errors eliminated
+- [ ] Orphaned step warnings dramatically reduced
+
+---
+
+#### 7.3 Add Profile Regression Test
+
+**Recommendation Ref:** D1
+**Files Affected:** `tests/test_profile.py`
+
+**Description:**
+Integration test for `profiles/tm9-8014.yaml` — validates, compiles, asserts invariants (4 chapter known_ids, no L4, require_known_id on L1).
+
+**Acceptance Criteria:**
+- [ ] Profile loads and validates
+- [ ] No L4 hierarchy level
+- [ ] 4 chapter known_ids present
+
+---
+
+### Phase 7 Completion Checklist
+- [ ] `profiles/tm9-8014.yaml` created and validates
+- [ ] Pipeline produces QA-passing output for TM9-8014
+- [ ] Regression test added
+- [ ] All tests passing
+
+---
+
+## Phase 8: New Manual Profiles (TM9-8015 Series)
+
+**Estimated Effort:** ~60,000 tokens (including validation and tuning)
+**Dependencies:** Phase 5 (code fixes), Phase 7 (military TM profile patterns)
+**Parallelizable:** 8.1 and 8.2 are sequential (8.1 first, lessons applied to 8.2)
+
+### Goals
+- Create production profiles for two new manuals: TM9-8015-2 (strongest candidate) and TM9-8015-1
+- Validate both against real PDFs
+- Complete the M38A1 service manual set (3 of 3 TMs profiled)
+
+### Work Items
+
+#### 8.1 Create TM9-8015-2 Profile (Power Train/Body/Frame)
+
+**Recommendation Ref:** P4
+**Files Affected:** `profiles/tm9-8015-2.yaml` (new)
+
+**Description:**
+Best OCR quality of remaining manuals. 311 pages, 12 chapters, 64 Section headers. Based on TM9-8014 profile template:
+- 12-chapter known_ids from TOC
+- `require_known_id: true` on L1
+- Section (Roman numeral) L2 pattern
+- Numbered paragraph L3 with filtering
+- No L4 level
+- Cross-references to companion TMs (TM9-8014, TM9-8015-1)
+- OCR substitutions tuned to this manual
+
+**Acceptance Criteria:**
+- [ ] Profile passes schema validation
+- [ ] Pipeline produces QA-passing output
+- [ ] 12 chapter known_ids
+- [ ] Profile regression test added
+
+---
+
+#### 8.2 Create TM9-8015-1 Profile (Engine/Clutch)
+
+**Recommendation Ref:** P5
+**Files Affected:** `profiles/tm9-8015-1.yaml` (new)
+
+**Description:**
+Poorest OCR quality. 188 pages, zero clean CHAPTER markers. Requires:
+- Heavy reliance on known_ids (chapter headings too garbled for regex)
+- Aggressive OCR substitutions (multiple patterns from TM9-8015-2 experience)
+- No L4 level
+- May need fallback strategy if chapters are undetectable
+
+**Acceptance Criteria:**
+- [ ] Profile passes schema validation
+- [ ] Pipeline completes without errors
+- [ ] QA passes or failures are documented with justification
+- [ ] Profile regression test added
+
+---
+
+### Phase 8 Completion Checklist
+- [ ] `profiles/tm9-8015-2.yaml` created, validated, QA passes
+- [ ] `profiles/tm9-8015-1.yaml` created, validated, best-effort QA
+- [ ] Both regression tests added
+- [ ] All tests passing
+- [ ] M38A1 manual set complete (TM9-8014 + TM9-8015-1 + TM9-8015-2)
+
+---
+
+## Phase 9: Multi-Manual Regression Suite
+
+**Estimated Effort:** ~30,000 tokens
+**Dependencies:** Phases 6-8 (all production profiles must exist)
+**Parallelizable:** No — final integration phase
+
+### Goals
+- Create a comprehensive profile regression test that validates all production profiles
+- Add CLI validation report grouping for better UX
+- Update documentation
+
+### Work Items
+
+#### 9.1 Profile Discovery Test
+
+**Recommendation Ref:** D1
+**Files Affected:** `tests/test_profile.py`, `tests/conftest.py`
+
+**Description:**
+Add a conftest fixture that discovers all YAML files in `profiles/`. Create a parametrized test that loads each profile, validates it, compiles patterns, and asserts common invariants:
+- Schema valid
+- All regex patterns compile
+- L1 has `require_known_id: true`
+- known_ids is non-empty on L1
+- No duplicate known_ids within a level
+
+**Acceptance Criteria:**
+- [ ] Test automatically discovers all profiles in `profiles/`
+- [ ] Each profile passes all common invariants
+- [ ] Adding a new profile automatically includes it in the test
+
+---
+
+#### 9.2 CLI Validation Report Grouping
+
+**Recommendation Ref:** D2
+**Files Affected:** `src/pipeline/cli.py`, `tests/test_cli.py`
+
+**Description:**
+After logging all issues, add a summary grouping:
+```
+=== Validation Summary ===
+cross_ref_validity: 0 errors, 5 warnings
+size_outlier: 0 errors, 12 warnings
+orphaned_steps: 0 errors, 3 warnings
+...
+Total: 0 errors, 20 warnings
+Result: PASSED
 ```
 
-All 349 existing tests plus ~10 new tests from Phases 1 and 3 must pass.
+Keep full detail in normal mode; add `--summary-only` flag to suppress per-issue output.
 
 **Acceptance Criteria:**
-- [ ] All tests pass (expected: 359+)
-- [ ] No regressions
+- [ ] Summary appears after individual issues
+- [ ] Groups by (check, severity)
+- [ ] Shows total counts
+- [ ] 2 new tests
 
 ---
 
-### Phase 4 Completion Checklist
-- [ ] Pipeline runs end-to-end with production profile
-- [ ] All metric targets met or close
-- [ ] QA passes
-- [ ] Full test suite green
-- [ ] Profile tuned based on iterative findings
+#### 9.3 Update Documentation
+
+**Recommendation Ref:** A1
+**Files Affected:** `CLAUDE.md`, `PROGRESS.md`, `LEARNINGS.md`
+
+**Description:**
+- Update CLAUDE.md code layout with all production profiles
+- Update PROGRESS.md with Phase 5-9 completion records
+- Update LEARNINGS.md with multi-manual findings
+- Formalize test fixture vs production profile convention in CLAUDE.md
+
+**Acceptance Criteria:**
+- [ ] CLAUDE.md reflects current state
+- [ ] Convention documented: test fixtures are minimal, production profiles are complete
+
+---
+
+### Phase 9 Completion Checklist
+- [ ] Profile discovery test covers all production profiles
+- [ ] CLI validation report is usable for multi-manual workflows
+- [ ] Documentation updated
+- [ ] All tests passing
 
 ---
 
 ## Parallel Work Opportunities
 
-Phases 1 and 3 are fully independent and can execute concurrently:
+Phases 1 and 3 are fully independent and can execute concurrently (completed):
 
 | Work Item | Can Run With | Notes |
 |-----------|--------------|-------|
-| Phase 1 (known_ids filter) | Phase 3 (cross-ref fix) | Different files: profile.py + parser vs. chunk_assembly + qa |
-| 1.1 (schema) | 3.1 (qualify refs) | No file overlap |
-| 1.2 (dataclass) | 3.2 (downgrade) | Different modules |
-| 1.3 (filter) | 3.3 (tests) | Different test files |
-| 1.4 (tests) | 3.3 (tests) | Different test classes |
-| Phase 2 (profile) | — | Depends on Phase 1 |
-| Phase 4 (validation) | — | Depends on all |
+| Phase 1 (known_ids filter) | Phase 3 (cross-ref fix) | Complete |
+| Phase 5.1 (partial-path) | Phase 5.2 (regex subs) | Different files: qa.py vs. ocr_cleanup.py + profile.py |
+| Phase 5.1 (partial-path) | Phase 5.3 (char-spacing) | Different files entirely |
+| Phase 5.2 (regex subs) | Phase 5.3 (char-spacing) | Both in ocr_cleanup.py but different functions |
+| Phase 6 (CJ profile) | Phase 7 (TM9-8014 profile) | Different profiles, different manuals |
+| Phase 8.1 (TM9-8015-2) | — | Sequential: lessons feed into 8.2 |
+| Phase 9 (regression suite) | — | Depends on all profiles existing |
 
 ---
 
@@ -528,12 +598,16 @@ Phases 1 and 3 are fully independent and can execute concurrently:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| L4 pattern too broad, creates false positives | Medium | Medium | `min_content_words: 3` guards against empty component headers. Monitor during Phase 4, tighten if false-positive rate > 10%. |
-| `a`-suffixed group variants rejected by known_ids filter | Medium | Low | Phase 4.4 handles iteratively — discover and add during first validation run. |
-| L3 closed vocabulary misses non-standard procedure names | Low | Medium | Start with Chrysler standard keywords. Add more during Phase 4.4 if genuine procedures are missed. |
-| Test fixture changes break existing tests | Zero | — | Test fixture is NOT modified. Production profile is a separate file. |
-| Cross-ref qualification changes metadata format | Low | Low | References were previously bare — now qualified. QA validator already supports prefix matching. |
-| Pattern changes interact unexpectedly with disambiguation | Low | High | The known_ids filter runs in `filter_boundaries()` AFTER `detect_boundaries()`, not during it. Disambiguation sees the same input. Filter cleans up afterward. |
+| L4 pattern too broad, creates false positives | Medium | Medium | Resolved: Remove L4 from military TM profiles entirely (P3). |
+| `a`-suffixed group variants rejected by known_ids filter | Medium | Low | Phase 4.4 handled iteratively (complete for XJ). |
+| L3 closed vocabulary misses non-standard procedure names | Low | Medium | Start with Chrysler standard keywords. Expand during tuning. |
+| Test fixture changes break existing tests | Zero | — | Test fixtures are NOT modified. Production profiles are separate. |
+| Cross-ref partial-path over-matches | Low | Medium | Segment-boundary matching (`::69` not `::169`) prevents false positives. Test with edge cases. |
+| Character-spacing collapse changes meaning | Low | Low | Requires 3+ single-char sequences. Two-letter combos preserved. Opt-in flag. |
+| Regex substitution performance | Low | Low | Patterns are compiled once during profile load, not per-page. Small pattern count. |
+| CJ compound IDs (D1, F1) not detectable in OCR | Medium | Medium | OCR may render as `D 1` or `D l` (lowercase L). Test with real data; add literal substitutions if needed. |
+| TM9-8014 Chapters 2 and 3 are image-only | High | Medium | Accept 2-chapter coverage or add synthetic boundaries at known page ranges from TOC. |
+| TM9-8015-1 OCR too degraded for pipeline | Medium | Medium | If QA fails despite best-effort profile, document as needing re-OCR. Pipeline correctness > coverage. |
 
 ---
 
@@ -541,32 +615,44 @@ Phases 1 and 3 are fully independent and can execute concurrently:
 
 | Metric | Current (Baseline) | Target | Measurement |
 |--------|-------------------|--------|-------------|
-| QA passed | False | True | `pipeline validate` exit code 0 |
-| Cross-ref errors | 113 | 0 | QA report error count |
-| known_ids warnings | 1,716 | <20 | QA report warning count |
-| L1 false positives | ~2,700 | 0 | Boundary diagnostics |
-| L3 procedure detection | 82 (8%) | 500+ (target) | Boundary diagnostics level distribution |
-| Undersized chunks | 637 (26%) | <10% | Chunk size distribution |
-| Total tests | 349 | 359+ | `pytest` summary |
+| XJ QA passed | True | True (maintain) | `pipeline validate` exit code 0 |
+| CJ QA passed | False (11 errors) | True | `pipeline validate` exit code 0 |
+| TM9-8014 QA passed | False (342 errors) | True | `pipeline validate` exit code 0 |
+| TM9-8015-2 QA passed | N/A (no profile) | True | `pipeline validate` exit code 0 |
+| TM9-8015-1 QA passed | N/A (no profile) | True or documented | `pipeline validate` |
+| Production profiles | 1 (XJ) | 5 (XJ, CJ, TM9-8014, 8015-1, 8015-2) | `ls profiles/*.yaml` |
+| Total tests | 439 | 470+ | `pytest` summary |
+| Manuals with QA passing | 1/3 profiled | 4-5/5 profiled | Pipeline validation runs |
 
 ---
 
-## Files Changed
+## Files Changed (Phases 5-9)
 
 | File | Phase | Change |
 |------|-------|--------|
-| `schema/manual_profile_v1.schema.json` | 1 | Add `require_known_id` property |
-| `src/pipeline/profile.py` | 1 | Add `require_known_id` field to `HierarchyLevel` |
-| `src/pipeline/structural_parser.py` | 1 | Add known_id filtering pass (Pass 0) in `filter_boundaries()` |
-| `tests/test_structural_parser.py` | 1 | Add `TestRequireKnownId` class (5 tests) |
-| `profiles/xj-1999.yaml` | 2 | New production profile |
-| `tests/test_profile.py` | 2 | Add production profile regression test |
-| `src/pipeline/chunk_assembly.py` | 3 | Qualify cross-refs with `manual_id::` in `enrich_chunk_metadata()` |
-| `src/pipeline/qa.py` | 3 | Add `profile` param to `check_cross_ref_validity()`; downgrade skip-section refs |
-| `tests/test_qa.py` | 3 | Add cross-ref qualification tests (3 tests) |
-| `tests/test_chunk_assembly.py` | 3 | Add cross-ref enrichment tests (2 tests) |
+| `src/pipeline/qa.py` | 5.1 | Add suffix-segment matching to cross-ref resolution |
+| `tests/test_qa.py` | 5.1 | Add 4 partial-path matching tests |
+| `src/pipeline/profile.py` | 5.2, 5.3 | Add `regex_substitutions`, `collapse_spaced_chars` to `OcrCleanupConfig` |
+| `src/pipeline/ocr_cleanup.py` | 5.2, 5.3 | Add `apply_regex_substitutions()`, `collapse_spaced_characters()` |
+| `schema/manual_profile_v1.schema.json` | 5.2, 5.3 | Add `regex_substitutions`, `collapse_spaced_chars` properties |
+| `tests/test_ocr_cleanup.py` | 5.2, 5.3 | Add 9 new tests (5 regex + 4 spacing) |
+| `tests/test_profile.py` | 5.2 | Add regex validation test |
+| `src/pipeline/structural_parser.py` | 5.4 | Add per-pass INFO logging |
+| `profiles/cj-universal.yaml` | 6.1 | New production CJ profile |
+| `tests/test_profile.py` | 6.3 | Add CJ profile regression test |
+| `profiles/tm9-8014.yaml` | 7.1 | New production TM9-8014 profile |
+| `tests/test_profile.py` | 7.3 | Add TM9-8014 profile regression test |
+| `profiles/tm9-8015-2.yaml` | 8.1 | New TM9-8015-2 profile |
+| `profiles/tm9-8015-1.yaml` | 8.2 | New TM9-8015-1 profile |
+| `tests/test_profile.py` | 8.1, 8.2 | Add regression tests for both new profiles |
+| `tests/conftest.py` | 9.1 | Add profile discovery fixture |
+| `src/pipeline/cli.py` | 9.2 | Add validation report grouping |
+| `tests/test_cli.py` | 9.2 | Add 2 report grouping tests |
+| `CLAUDE.md` | 9.3 | Update documentation |
+| `PROGRESS.md` | 9.3 | Update completion records |
+| `LEARNINGS.md` | 9.3 | Add multi-manual findings |
 
 ---
 
-*Implementation plan generated by Claude on 2026-02-16*
-*Based on: RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md*
+*Implementation plan generated by Claude on 2026-02-16 (Phases 1-4), 2026-02-17 (Phases 5-9)*
+*Based on: RECOMMENDATIONS.md + FINDINGS.md*
