@@ -1,349 +1,300 @@
 # Improvement Recommendations
 
 **Generated:** 2026-02-16
-**Analyzed Project:** manual-chatbot (Smart Chunking Pipeline for Vehicle Service Manual RAG)
-**Input:** End-to-end pipeline run on 1,948-page XJ service manual — output quality analysis
+**Analyzed Project:** manual-chatbot — Smart Chunking Pipeline for Vehicle Service Manual RAG
+**Baseline:** End-to-end XJ pipeline run — 2,408 chunks, 113 errors, 2,379 warnings, QA Failed
+**Supersedes:** Previous RECOMMENDATIONS.md (25,130-chunk baseline — all 3 phases complete, 349 tests passing)
 
 ---
 
 ## Executive Summary
 
-The pipeline successfully processes the 1,948-page 1999 Jeep Cherokee (XJ) service manual end-to-end, producing 25,130 chunks in 17 MB of JSONL — but output quality has four systemic problems that make the chunks unsuitable for production RAG retrieval.
+After completing the initial three-phase remediation (skip list, metadata enrichment, boundary filtering, cross-entry merge), the pipeline processes the 1,948-page 1999 XJ Service Manual into 2,408 chunks — down from 25,130. However, the end-to-end validation run reveals four remaining systemic issues that prevent QA from passing: a cascade hierarchy collapse where 92% of L3 procedure boundaries go undetected, 637 undersized chunks (26%), 1,716 known_ids warnings from an incomplete test-only profile, and a 100% cross-reference validation failure rate (113 errors).
 
-**Problem 1 — Boundary over-detection:** The level 2 hierarchy pattern `^([A-Z][A-Z ]{3,})$` matches ANY all-caps line with 4+ characters. In OCR'd wiring diagrams, component labels like "SWITCH" (206 occurrences), "LAMP" (179), "POWER" (175), "RELAY" (159) each trigger a section boundary. Result: 24,473 boundaries from 1,948 pages — roughly 12.5 boundaries per page, when a real service manual has ~2-3 structural transitions per page.
+All four issues trace to a shared root cause: the Level 1 `id_pattern` (`^\d+[A-Z]?[a-z]?\s`) matches any line starting with a digit, producing ~2,748 false L1 boundaries. These false L1 hits reset the disambiguation algorithm's `current_level`, causing L2 to always win over L3 (since L3 is "deeper" but context keeps getting reset). The fix is surgical — a mandatory known_ids filter that rejects L1 boundaries not in the known group list, combined with a production-quality profile that has closed-vocabulary L3 patterns and complete group inventory.
 
-**Problem 2 — Tiny isolated chunks:** 61.6% of chunks (15,477) contain 5 words or fewer. Median chunk length is 3 words. R6 (merge small) cannot fix this because it operates within a single manifest entry's text, not across entries. A 1-word boundary creates a 1-word entry that R6 can never merge.
-
-**Problem 3 — Wiring diagram noise:** The 8W Wiring Diagrams group accounts for 11,516 chunks (46% of all output), of which 7,478 (65%) contain 3 words or fewer. These are OCR'd component labels and wire color codes, not prose suitable for RAG. The profile already declares `wiring_diagrams.section_id: "8W"` but the pipeline ignores it.
-
-**Problem 4 — Empty metadata enrichment:** Every chunk has `has_safety_callouts: []`, `figure_references: []`, `cross_references: []` despite 997 chunks containing WARNING/CAUTION/NOTE text and 2,287 chunks referencing figures. The detection functions exist (`detect_safety_callouts()`, figure pattern matching) but their results are never stored in chunk metadata. `build_manifest()` hardcodes these fields to `[]` and `assemble_chunks()` copies the empty values through.
-
-All four issues are fixable with targeted changes. The pipeline architecture is sound — no redesign needed.
+Beyond these immediate output quality fixes, the analysis identifies opportunities for developer experience improvements (integration testing gap, validation UX), architectural resilience (disambiguation algorithm sensitivity), and future extensibility (profile bootstrapping, multi-manual regression).
 
 ---
 
 ## Recommendation Categories
 
-### Category 1: Boundary Pattern Precision
+### Category 1: Output Quality Enhancements
 
-#### Q1. Tighten Level 2 (Section) Pattern to Require Multi-Word Headings
+#### Q1. Mandatory known_ids Boundary Filter
 
 **Priority:** Critical
+**Effort:** S
+**Impact:** Eliminates ~2,700 false L1 boundaries; unblocks correct hierarchy detection for all deeper levels
+
+**Current State:**
+`filter_boundaries()` has three filter passes (blank-line, gap, content-words) but no mechanism to reject boundaries with unrecognized IDs. The `validate_boundaries()` function produces advisory warnings only. The L1 pattern `^\d+[A-Z]?[a-z]?\s` matches any line starting with a digit, producing 2,748 L1 boundaries when only ~55 are real. These false L1 boundaries reset `current_level` in the disambiguation logic at `structural_parser.py:136-140`, causing L2 to always win over L3.
+
+**Recommendation:**
+Add `require_known_id: bool = False` to `HierarchyLevel` dataclass. When `true` and `known_ids` is non-empty, `filter_boundaries()` inserts a new Pass 0 that rejects any boundary at that level whose extracted ID is not in the known set. Boundaries with `id=None` are also rejected. This is a 3-file change (schema, dataclass, filter) with zero behavior change for existing profiles.
+
+**Implementation Notes:**
+- Must run as Pass 0 before other filter passes so downstream passes operate on clean data
+- Defaults to `false` — existing tests and profiles are completely unaffected
+- The known_ids list already exists on `HierarchyLevel` — this just makes it enforceable
+- 5 new tests to cover: reject unknown, pass all when false, empty known_ids guard, None id rejection, level isolation
+
+---
+
+#### Q2. Closed-Vocabulary L3 Procedure Detection
+
+**Priority:** Critical
+**Effort:** S
+**Impact:** Increases procedure detection from 82 to 500+ boundaries; fixes the core "92% procedures missed" defect
+
+**Current State:**
+L3 `title_pattern` is `^([A-Z]{2,}(?:\s+[A-Z/\-\(\) ]{2,})+)$` — a strict superset of L2's pattern. The disambiguation logic always picks L2 because it's shallower. Single-word procedures like "REMOVAL" and "INSTALLATION" require `{2,}` words, so they never match. The `require_blank_before: true` filter kills 74.5% of remaining matches because OCR output lacks consistent blank lines.
+
+**Recommendation:**
+Replace the generic L3 pattern with a closed vocabulary of Chrysler standardized procedure keywords: `REMOVAL AND INSTALLATION`, `REMOVAL`, `INSTALLATION`, `DIAGNOSIS AND TESTING`, `DESCRIPTION AND OPERATION`, `DISASSEMBLY AND ASSEMBLY`, `CLEANING AND INSPECTION`, `ADJUSTMENT`, `OVERHAUL`, `SPECIFICATIONS`, `SPECIAL TOOLS`, `TORQUE CHART`, `TORQUE SPECIFICATIONS`. Remove `require_blank_before` for this level. Add negative lookahead to L2 pattern to prevent L2/L3 overlap entirely.
+
+**Implementation Notes:**
+- Profile-only change (production profile, not code)
+- Multi-word patterns listed before single-word to avoid partial matches
+- `min_content_words: 3` retained as a light false-positive guard
+- `min_gap_lines: 0` — procedure headings can appear close together
+- `require_blank_before: false` — only 25.5% of procedure headings have a preceding blank line
+
+---
+
+#### Q3. Cross-Reference Namespace Qualification
+
+**Priority:** High
+**Effort:** XS
+**Impact:** Eliminates 113 cross-reference errors (100% current failure rate)
+
+**Current State:**
+`enrich_chunk_metadata()` at `chunk_assembly.py:744-748` stores bare group numbers (e.g., `"7"`) from regex captures, but `check_cross_ref_validity()` at `qa.py:242-275` validates against qualified chunk ID prefixes (e.g., `"xj-1999::7"`). Every cross-reference fails because the namespace never matches.
+
+**Recommendation:**
+Qualify captured cross-reference strings with `{manual_id}::` at creation time in `enrich_chunk_metadata()`. This is a 3-line change. Additionally, downgrade cross-references to skipped sections (e.g., `8W`) from error to warning in `check_cross_ref_validity()`, since those sections are intentionally excluded from chunking.
+
+**Implementation Notes:**
+- Fix is in `chunk_assembly.py` (creation), not `qa.py` (validation)
+- Downgrade logic needs `profile` parameter threaded to `check_cross_ref_validity()`
+- `run_validation_suite()` call site needs updating to pass `profile`
+- Independent of other fixes — can be implemented in parallel with Q1/Q2
+- 5 new tests: qualified resolves, bare fails, skipped section is warning, enrichment qualification, dedup
+
+---
+
+#### Q4. Wiring Diagram Leak Prevention
+
+**Priority:** Medium
+**Effort:** S (mostly addressed by Q1)
+**Impact:** Eliminates ~303 undersized wiring diagram fragments (47.6% of all undersized chunks)
+
+**Current State:**
+`skip_sections: ["8W"]` is configured and functional, but wiring diagram content leaks into chunks because false L1 boundaries create incorrect section assignments. The skip logic depends on accurate L1 detection to identify which chunks belong to 8W. With 2,748 false L1 boundaries, section attribution is unreliable.
+
+**Recommendation:**
+This is substantially addressed by Q1 (mandatory known_ids filter). With accurate L1 detection, 8W sections will be correctly identified and skipped. Monitor residual leakage during end-to-end validation and add secondary page-range-based filtering if needed.
+
+**Implementation Notes:**
+- No new code expected — resolved as a side effect of Q1
+- Validate during Phase 4 end-to-end run
+- The remaining 52.4% of undersized chunks (header stubs, OCR fragments) will also decrease with better boundary detection
+
+---
+
+#### Q5. Complete Production Profile for XJ 1999
+
+**Priority:** High
 **Effort:** M
-**Impact:** Eliminates ~12,000 false-positive boundaries, reducing chunk count by ~50%
+**Impact:** Transforms pipeline from "only works on test fixtures" to "processes real manuals correctly"
 
 **Current State:**
-Level 2 `id_pattern` and `title_pattern` are both `^([A-Z][A-Z ]{3,})$`. This matches any all-caps line 4+ characters wide. In the XJ manual's OCR output, this fires on:
-- Component labels in wiring diagrams: SWITCH (206x), LAMP (179x), POWER (175x), RELAY (159x), SENSOR (90x), MOTOR (84x)
-- Single-word artifact lines: POSITION, INCORRECT, VEHICLES, EQUIPPED, PASSIVE
-- Shredded WARNING text: "REFER TO" (94x), "WITH AIR- BAGS," (93x), "GROUP 8M -" (93x), "DEPLOYMENT AND" (101x)
-
-These are NOT section headings. Real section headings in the XJ manual are multi-word phrases: "GENERAL INFORMATION", "TORQUE SPECIFICATIONS", "REMOVAL AND INSTALLATION", "COOLING SYSTEM", "DIFFERENTIAL AND DRIVELINE".
+The only XJ profile is `tests/fixtures/xj_1999_profile.yaml` with 8 known_ids, loose patterns, and no production tuning. It was designed for unit test isolation, not for processing the actual 1,948-page manual.
 
 **Recommendation:**
-1. **Require minimum 2 words** in the section pattern. Single uppercase words are component labels, not section titles.
-2. **Increase minimum character count** from 4 to 8+ to avoid matching short fragments.
-3. Consider adding a **negative match list** for known false-positive words common in wiring diagram OCR.
-
-**Proposed pattern:**
-```yaml
-# Level 2 section: at least 2 uppercase words, 8+ total chars
-id_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
-title_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
-```
-
-This matches "GENERAL INFORMATION" and "COOLING SYSTEM" but rejects "SWITCH", "LAMP", "RELAY".
+Create `profiles/xj-1999.yaml` as a separate production profile with: complete known_ids list (~39 groups from the XJ Tab Locator), closed-vocabulary L3 pattern (Q2), L2 negative lookahead, broader L4 component pattern, and `require_known_id: true` on L1. Keep the test fixture unchanged for unit test stability.
 
 **Implementation Notes:**
-- Profile YAML change only — no code change needed in structural_parser.py
-- Must validate against actual section headings from the XJ manual to ensure no false negatives
-- The pattern must still work for single-word group names that ARE valid at level 1 (e.g., "ENGINE", "BRAKES") — these are level 1, not level 2, so this change is safe
+- Some group IDs have `a`-suffixed international variants (e.g., `0a`, `9a`) — discover iteratively
+- L4 pattern `^([A-Z][A-Z][A-Z \-/]{1,}(?:\([A-Z0-9\. ]+\))?)$` broadens matching but carries false-positive risk — `min_content_words: 3` guards against empties
+- Profile separation means 349 existing tests are completely unaffected
+- New integration-level test should validate production profile loads and compiles
 
 ---
 
-#### Q2. Tighten Level 3 (Procedure) Pattern
+### Category 2: Architecture Improvements
 
-**Priority:** High
-**Effort:** S
-**Impact:** Reduces false-positive procedure boundaries by ~3,000-5,000
+#### A1. Boundary Disambiguation Algorithm Resilience
+
+**Priority:** Medium
+**Effort:** M
+**Impact:** Prevents cascade failures when patterns overlap across hierarchy levels
 
 **Current State:**
-Level 3 pattern `^([A-Z][A-Z \-\/\(\)]{5,})$` matches any all-caps line 6+ chars including hyphens, slashes, and parens. Too broad — matches component descriptions, table column headers, and OCR noise fragments.
-
-Real procedure headings follow predictable patterns: "REMOVAL AND INSTALLATION", "DISASSEMBLY AND ASSEMBLY", "DIAGNOSIS AND TESTING", "ADJUSTMENT", "INSPECTION".
+`detect_boundaries()` at `structural_parser.py:126-140` uses a simple disambiguation heuristic: when multiple levels match, pick the shallowest deeper than `current_level`, or reset to the shallowest overall. This creates fragile coupling — if any level matches too broadly, the `current_level` reset cascades through all deeper levels. The L1/L2/L3 overlap exposed this: L1 resets context, L2 always wins over L3, 92% of procedures disappear.
 
 **Recommendation:**
-Require at least 2 words and increase minimum length. Procedure headings in Chrysler manuals are multi-word action phrases.
-
-**Proposed pattern:**
-```yaml
-title_pattern: "^([A-Z][A-Z]+(?:\\s+(?:AND|OR|OF|THE|IN|FOR|TO)\\s+)?[A-Z][A-Z \\-\\/\\(\\)]{3,})$"
-```
+Not needed for current release — Q1 (known_ids filter) solves the immediate problem by eliminating false L1 boundaries before disambiguation runs. A more robust approach (confidence scoring, pattern specificity weighting, or ML-based heading classification) would be valuable when onboarding manuals with less predictable heading structures. Document the fragility in code comments as a known limitation.
 
 **Implementation Notes:**
-- Profile YAML change only
-- Test against procedure headings extracted from the pipeline run
-- The conjunction words (AND, OR, OF) are included because "REMOVAL AND INSTALLATION" is a canonical procedure heading format
+- Deferred to future release
+- Would become important for non-Chrysler manuals with unpredictable heading formats
+- The Q1 filter is the pragmatic fix for the deterministic, closed-vocabulary world of Chrysler manuals
 
 ---
 
-#### Q3. Add Post-Detection Boundary Filtering in `detect_boundaries()`
+#### A2. Filter Pipeline Observability
+
+**Priority:** Low
+**Effort:** XS
+**Impact:** Faster debugging when filter passes produce unexpected results
+
+**Current State:**
+`filter_boundaries()` logs total before/after counts but not per-pass counts. When 9,207 boundaries become 6,315, there's no way to see which of the 3 passes removed how many without adding debug code.
+
+**Recommendation:**
+Add per-pass logging at INFO level: `"Pass 0 (known_id): %d -> %d"`, `"Pass 1 (blank_before): %d -> %d"`, etc. Zero behavioral change, pure diagnostic improvement.
+
+**Implementation Notes:**
+- 4-5 additional `logger.info()` calls in `filter_boundaries()`
+- Already partially present (the final before/after log exists)
+- Could also track removed boundaries at DEBUG level for deeper investigation
+
+---
+
+### Category 3: Developer Experience
+
+#### D1. Integration Test for End-to-End Pipeline
 
 **Priority:** High
 **Effort:** M
-**Impact:** Prevents the structural fragmentation that creates 1-3 word chunks even when patterns are correct
+**Impact:** Catches cascade failures before they reach production; the L1/L2/L3 collapse was only discovered by running the real 1,948-page PDF manually
 
 **Current State:**
-`detect_boundaries()` matches patterns line-by-line with zero contextual validation. A line matching a section pattern immediately becomes a boundary, regardless of:
-- Whether the previous boundary was 0 lines ago (back-to-back boundaries = false positives)
-- Whether there's any content between boundaries (empty boundaries = junk chunks)
-- Whether the line is embedded in the middle of a paragraph or stands alone
+349 unit tests cover individual modules thoroughly, but there is no integration test that runs the full pipeline (extract -> clean -> detect -> filter -> build -> assemble -> validate) on a representative multi-page document. The cascade failure was invisible to unit tests because each module works correctly in isolation — the problem only manifests when they interact with real-world data.
 
 **Recommendation:**
-Add a **post-detection filter** pass after boundary detection that removes suspect boundaries:
-
-1. **Minimum gap filter**: If two boundaries at the same level are fewer than N lines apart (configurable, default: 3), keep only the first one. Back-to-back boundaries indicate OCR noise matching.
-2. **Minimum content filter**: If a boundary has fewer than N words of content before the next boundary (configurable, default: 5), suppress it as a false positive.
-3. **Standalone line check**: Optionally require section-level boundaries to be preceded by a blank line or page boundary.
-
-Add these as **profile-configurable fields** on the hierarchy level:
-```yaml
-- level: 2
-  name: "section"
-  id_pattern: "..."
-  title_pattern: "..."
-  min_gap_lines: 3        # NEW: minimum lines between same-level boundaries
-  min_content_words: 5     # NEW: minimum words before next boundary
-  require_blank_before: true  # NEW: boundary line must follow blank line
-```
+Create a small (5-10 page) synthetic test document with known structure: 2-3 L1 groups, 3-4 L2 sections, 5+ L3 procedures, 2+ L4 sub-procedures, including digit-starting lines that should NOT become L1 boundaries. Run the full pipeline in a pytest integration test and assert boundary counts per level, chunk count range, zero QA errors, and specific chunk IDs present. Mark as `@pytest.mark.integration`.
 
 **Implementation Notes:**
-- New optional fields on `HierarchyLevel` dataclass (defaults to disabled for backward compat)
-- Applied as a post-filter after `detect_boundaries()` returns, before `build_manifest()`
-- Alternatively, integrate into `detect_boundaries()` itself by tracking previous boundary position
-- Test: create a fixture with back-to-back uppercase words and verify filtering removes false positives
+- Synthetic fixture avoids test dependency on the 50MB real manual
+- Assert both positive (expected boundaries found) and negative (no false L1 from digit-starting lines)
+- Could reuse existing test fixtures, assembled into a multi-page document
+- Key assertion: L3 procedure boundaries are detected (the thing that broke)
 
 ---
 
-### Category 2: Chunk Assembly Improvements
-
-#### Q4. Add Cross-Entry Merge Pass After Chunk Assembly
-
-**Priority:** Critical
-**Effort:** L
-**Impact:** Merges ~15,000 tiny chunks into meaningful units — transforms the median chunk from 3 words to 50+ words
-
-**Current State:**
-`assemble_chunks()` processes each manifest entry independently. For each entry, it extracts text between `line_range.start` and the next entry's start, applies R1-R8, and produces chunks. R6 (merge small) operates only on the `text_chunks` list within that single entry — it can only merge fragments within one entry's text span.
-
-If a manifest entry has 1 word of text (because the next boundary starts immediately), R6 produces a 1-word chunk and moves on. There is no mechanism to merge across entry boundaries. This is why 15,477 chunks are ≤5 words — they are structurally isolated.
-
-**Recommendation:**
-Add a **post-assembly cross-entry merge pass** that runs after all chunks are built:
-
-```python
-def merge_small_across_entries(chunks: list[Chunk], min_tokens: int = 200) -> list[Chunk]:
-    """Merge undersized chunks into their next sibling within the same level-1 group."""
-    result = []
-    i = 0
-    while i < len(chunks):
-        chunk = chunks[i]
-        tokens = count_tokens(chunk.text)
-        if tokens < min_tokens and i + 1 < len(chunks):
-            next_chunk = chunks[i + 1]
-            # Only merge within the same level-1 group
-            if chunk.metadata["level1_id"] == next_chunk.metadata["level1_id"]:
-                # Absorb into next chunk
-                next_chunk.text = chunk.text + "\n\n" + next_chunk.text
-                i += 1
-                continue
-        result.append(chunk)
-        i += 1
-    return result
-```
-
-Call at the end of `assemble_chunks()` before returning.
-
-**Implementation Notes:**
-- New function in `chunk_assembly.py`
-- Must respect level-1 group boundaries (don't merge across groups)
-- The absorbing chunk keeps its own chunk_id and metadata (the small chunk's identity is lost, which is correct — it was too small to be a standalone retrieval unit)
-- May need multiple passes until no chunk is below threshold
-- Test: create manifest entries that produce tiny chunks, verify post-merge sizes
-
----
-
-### Category 3: Special Content Handling
-
-#### Q5. Add Section Skip List for Wiring Diagrams and Similar Non-Prose Content
-
-**Priority:** Critical
-**Effort:** S
-**Impact:** Eliminates 11,516 junk chunks (46% of output) instantly
-
-**Current State:**
-The profile declares `content_types.wiring_diagrams.present: true` and `section_id: "8W"` but the pipeline never reads these fields. Every page in Group 8W is processed identically to prose pages — boundary detection fires on component labels, chunk assembly creates thousands of 1-3 word chunks, and the result is noise.
-
-8W pages are wiring diagrams — the OCR text is wire colors, pin numbers, connector IDs, and component labels. This is not natural language and has zero RAG value as individual chunks.
-
-**Recommendation:**
-Add a `skip_sections` list to the profile schema and filter in `assemble_chunks()`:
-
-```yaml
-# In profile YAML
-skip_sections:
-  - "8W"  # Wiring diagrams — OCR produces non-prose noise
-```
-
-In `assemble_chunks()`, check `entry.chunk_id` against skip_sections. For entries in skipped sections, either:
-- **Option A (recommended):** Skip entirely — produce no chunks
-- **Option B:** Produce one summary chunk per group with `content_type: "wiring_diagram"` and metadata tag for filtering
-
-**Implementation Notes:**
-- Add `skip_sections: list[str]` field to `ManualProfile` (loaded from YAML)
-- 5-line filter in `assemble_chunks()`: `if any(entry.chunk_id.startswith(f"{manual_id}::{skip}") for skip in profile.skip_sections): continue`
-- Alternative: use existing `content_types.wiring_diagrams.section_id` instead of a new field
-- Test: profile with `skip_sections: ["8W"]` produces zero chunks for 8W entries
-
----
-
-### Category 4: Metadata Enrichment
-
-#### Q6. Populate `has_safety_callouts` from Chunk Text
-
-**Priority:** High
-**Effort:** S
-**Impact:** Enables safety-aware retrieval for 997 chunks containing WARNING/CAUTION/NOTE text
-
-**Current State:**
-Every chunk has `has_safety_callouts: []`. The detection function `detect_safety_callouts()` exists and works — R4 calls it to decide merging. But its results are never stored in metadata. `build_manifest()` hardcodes `has_safety_callouts=[]` and `assemble_chunks()` copies `entry.has_safety_callouts` (always `[]`) into the metadata dict at line 812.
-
-The safety patterns (`^WARNING:`, `^CAUTION:`, `^NOTE:`) would match. The OCR text contains 997 chunks with these patterns. The wiring is just missing.
-
-**Recommendation:**
-In `assemble_chunks()`, after the rule pipeline produces final `text_chunks`, run `detect_safety_callouts()` on each chunk's text and store the detected callout levels in metadata:
-
-```python
-# After rule pipeline, for each final chunk_text:
-callouts = detect_safety_callouts(chunk_text, profile)
-safety_levels = sorted(set(c["level"] for c in callouts))
-# Store in metadata:
-metadata["has_safety_callouts"] = safety_levels
-```
-
-**Implementation Notes:**
-- ~5 lines added to the chunk building loop in `assemble_chunks()`
-- `detect_safety_callouts()` already handles pattern matching and extent finding
-- Should scan the final chunk text (after all rules applied), not the raw manifest entry text
-- Test: chunk containing "WARNING: DO NOT..." should have `["warning"]` in metadata
-
----
-
-#### Q7. Populate `figure_references` from Chunk Text
-
-**Priority:** High
-**Effort:** S
-**Impact:** Enables figure-aware retrieval for 2,287 chunks referencing figures
-
-**Current State:**
-Same wiring problem as Q6. The profile defines `figure_reference.pattern: "\\(Fig\\.\\s+(\\d+)\\)"`. R8 uses it for merge decisions. But detected figure numbers are never stored in metadata. Every chunk has `figure_references: []`.
-
-**Recommendation:**
-In `assemble_chunks()`, scan each final chunk text with the figure reference pattern and populate `figure_references`:
-
-```python
-if profile.figure_reference_pattern:
-    fig_matches = re.findall(profile.figure_reference_pattern, chunk_text)
-    metadata["figure_references"] = sorted(set(fig_matches))
-```
-
-**Implementation Notes:**
-- 3 lines added to chunk building loop
-- `re.findall` with the profile pattern extracts all figure numbers
-- Deduplicate and sort for consistency
-
----
-
-#### Q8. Populate `cross_references` from Chunk Text
+#### D2. Production Profile Regression Test
 
 **Priority:** Medium
 **Effort:** S
-**Impact:** Enables cross-reference navigation in retrieval
+**Impact:** Prevents accidental profile regressions; catches regex typos, missing fields, invalid patterns
 
 **Current State:**
-`cross_references: []` for all chunks. Profile defines patterns `"Refer to Group (\\d+[A-Z]?)"` and `"Refer to (Section \\d+)"`. R7 uses these for merge decisions but never stores matches.
+No automated test validates that `profiles/xj-1999.yaml` loads correctly, passes schema validation, compiles all regex patterns, and has internally consistent configuration. A typo in a regex would only be caught by a manual pipeline run.
 
 **Recommendation:**
-In `assemble_chunks()`, scan each final chunk text with all cross-reference patterns:
-
-```python
-xrefs = []
-for pattern in profile.cross_reference_patterns:
-    xrefs.extend(re.findall(pattern, chunk_text))
-metadata["cross_references"] = sorted(set(xrefs))
-```
+Add a pytest test that loads the production profile, validates it, compiles all regex patterns, and asserts basic invariants (known_ids count > 30, L1 has `require_known_id: true`, L3 pattern contains procedure keywords). Mark as `@pytest.mark.integration`.
 
 **Implementation Notes:**
-- 4 lines added to chunk building loop
-- Combine with Q6 and Q7 into a single "metadata enrichment" block after rule application
-- Test: chunk containing "Refer to Group 8A" should have `["8A"]` in metadata
+- Lightweight test — no PDF processing, just profile loading and validation
+- Should be added alongside the production profile in Phase 2
+- Catches most common mistakes (typos, missing fields, invalid regex)
 
 ---
 
-#### Q9. Combine Q6-Q8 into a Single Metadata Enrichment Pass
+#### D3. Validation Report Summarization
 
-**Priority:** High (efficiency)
-**Effort:** S
-**Impact:** Clean code organization — one function handles all metadata population
+**Priority:** Low
+**Effort:** XS
+**Impact:** Makes CLI output actionable when there are thousands of issues
+
+**Current State:**
+`cmd_validate()` in `cli.py:342-345` logs every individual issue. With 2,379 warnings, the output is a wall of repetitive text. The important signal (113 cross-ref errors, all the same type) is buried.
 
 **Recommendation:**
-Create a `enrich_chunk_metadata()` function that takes the final chunk text, profile, and existing metadata dict, and populates all three fields:
+Add a summary grouping at the end of validation output: group issues by `(check, severity)`, show count and a single example for each group. Keep full detail available via `--verbose`.
 
-```python
-def enrich_chunk_metadata(
-    text: str, metadata: dict, profile: ManualProfile
-) -> None:
-    """Populate safety callouts, figure refs, and cross-refs from chunk text."""
-    # Safety callouts
-    callouts = detect_safety_callouts(text, profile)
-    metadata["has_safety_callouts"] = sorted(set(c["level"] for c in callouts))
+**Implementation Notes:**
+- Change in `cli.py` only (formatting, not validation logic)
+- Low effort but meaningful UX improvement for iterative tuning
 
-    # Figure references
-    if profile.figure_reference_pattern:
-        metadata["figure_references"] = sorted(set(
-            re.findall(profile.figure_reference_pattern, text)
-        ))
+---
 
-    # Cross references
-    xrefs = []
-    for pattern in profile.cross_reference_patterns:
-        xrefs.extend(re.findall(pattern, text))
-    metadata["cross_references"] = sorted(set(xrefs))
-```
+### Category 4: New Capabilities
+
+#### N1. Profile Bootstrapping from PDF
+
+**Priority:** Medium
+**Effort:** L
+**Impact:** Reduces time to onboard a new manual from hours to minutes
+
+**Current State:**
+`cmd_bootstrap_profile()` exists as a stub (`logger.error("bootstrap-profile is not yet implemented.")`). Onboarding a new manual requires manually examining the PDF, identifying hierarchy patterns, building the known_ids list, and tuning regex patterns.
+
+**Recommendation:**
+Implement LLM-assisted profile bootstrapping: extract sample pages (table of contents, first page of each group), send to an LLM with a structured prompt and the production XJ profile as a few-shot example, generate a draft profile YAML. Not in scope for current release but would dramatically reduce onboarding friction for future manuals.
+
+**Implementation Notes:**
+- Deferred — the production XJ profile serves as the "golden example" template
+- Could use existing `extract_pages()` for PDF sampling
+- Consider auto-detecting `skip_sections` based on content analysis
+
+---
+
+#### N2. Chunk Quality Metrics Persistence
+
+**Priority:** Low
+**Effort:** S
+**Impact:** Enables quantitative comparison across pipeline runs and profile iterations
+
+**Current State:**
+Pipeline metrics (chunk count, boundary counts, undersized percentage, QA pass/fail) are only available as log output. No way to track improvement across iterations or compare profiles quantitatively.
+
+**Recommendation:**
+Save run metrics to a JSON file alongside the chunks JSONL output: timestamp, profile path, boundary counts by level, chunk count, size distribution (min/median/mean/max/p10/p90), QA error/warning counts by check type. Enables `diff`-based comparison.
+
+**Implementation Notes:**
+- Low priority for current release
+- Simple JSON dump at end of `cmd_process()` and `cmd_validate()`
 
 ---
 
 ## Quick Wins
 
-1. **Q5: Skip wiring diagrams** — Add `skip_sections` field + 5-line filter. Eliminates 46% of junk chunks.
-2. **Q6+Q7+Q8 (via Q9): Metadata enrichment** — ~15 lines of new code. Wires existing detection logic into output. No new algorithms.
-3. **Q1+Q2: Tighten patterns** — Profile YAML changes only, no code. Requires validation against real headings.
+| # | Recommendation | Effort | Impact |
+|---|---------------|--------|--------|
+| Q3 | Cross-ref namespace qualification | XS | Eliminates 113 errors (one-line fix) |
+| A2 | Per-pass filter logging | XS | Better debugging during tuning |
+| D3 | Validation report summarization | XS | Actionable CLI output |
+
+These three can be completed in under an hour combined and immediately improve daily workflow.
+
+---
 
 ## Strategic Initiatives
 
-1. **Q4: Cross-entry merge** — New function with hierarchy-aware merge logic. Highest structural impact on chunk quality.
-2. **Q3: Boundary post-filtering** — New schema fields + filter logic. Generalizable to all manual profiles.
+| # | Recommendation | Effort | Impact |
+|---|---------------|--------|--------|
+| Q1+Q2+Q5 | Mandatory filter + closed vocabulary + production profile | S+S+M | Fixes the core cascade failure |
+| D1 | Integration test for end-to-end pipeline | M | Prevents future cascade regressions |
+| N1 | Profile bootstrapping from PDF | L | Unlocks multi-manual scaling |
+
+These require phased implementation and are covered in the Implementation Plan.
+
+---
 
 ## Not Recommended
 
-| Item | Rationale |
+| Idea | Rationale |
 |------|-----------|
-| **LLM-based boundary detection** | Overkill. Regex patterns work perfectly for Chrysler manuals' highly regular structure — the problem is pattern specificity, not approach. |
-| **Real tokenizer (tiktoken)** | Word-count approximation is fine for merge/split decisions. Whether a 3-word chunk has 3 or 4 BPE tokens doesn't change that it's too small. |
-| **OCR re-processing of wiring diagrams** | Better OCR won't help — wiring diagram content is inherently non-prose. Skip or tag is the right approach. |
-| **ML section classifier** | The hierarchical structure of Chrysler manuals is deterministic, not probabilistic. Regex is the right tool. |
+| ML-based heading classification | Over-engineering for current corpus. Chrysler service manual headings follow a deterministic, closed vocabulary. Regex with the right patterns is simpler, faster, and debuggable. Revisit if onboarding non-Chrysler manuals with unpredictable heading structures. |
+| Real tokenizer (tiktoken) for size checks | Word-count approximation is adequate for merge/split decisions. The difference between 3 words being 3 or 4 BPE tokens doesn't change that it's too small for RAG retrieval. |
+| Redesigning the disambiguation algorithm | Q1 (known_ids filter) eliminates the input that causes the cascade. The algorithm works correctly when its inputs are clean. Redesigning it is unnecessary complexity. |
+| Switching from dataclasses to Pydantic | 349 tests validate the current type system. Migration cost exceeds benefit. The codebase is consistent and working. |
+| Automatic pattern tuning | The root cause was a too-loose pattern combined with no validation gate. Manual profile authoring with mandatory known_ids is the right level of control for a corpus this small. |
 
 ---
 
 *Recommendations generated by Claude on 2026-02-16*
-*Source: End-to-end pipeline run on 1999 XJ Service Manual (1,948 pages → 25,130 chunks)*
+*Baseline: 2,408 chunks from 1,948-page XJ manual (post-Phase 1-3 remediation)*

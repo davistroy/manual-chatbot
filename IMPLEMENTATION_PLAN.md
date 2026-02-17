@@ -1,447 +1,526 @@
-# Implementation Plan: Production Output Quality
+# Implementation Plan: Output Quality — Phase 2
 
 **Generated:** 2026-02-16
-**Based On:** RECOMMENDATIONS.md (end-to-end XJ pipeline run analysis)
-**Supersedes:** Previous IMPLEMENTATION_PLAN.md (REVIEW.md remediation — all 4 phases complete, 349 tests passing)
-**Total Phases:** 3
-**Estimated Total Effort:** ~180K tokens
+**Based On:** RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md
+**Supersedes:** Previous IMPLEMENTATION_PLAN.md (Phase 1-3 remediation — complete, 349 tests passing)
+**Total Phases:** 4
+**Estimated Total Effort:** ~100K tokens
 
 ---
 
 ## Plan Overview
 
-This plan addresses the four production output quality issues identified by running the real 1,948-page XJ service manual through the pipeline. The previous plan (architectural remediation) is fully complete — 349 tests passing. This plan builds on that foundation.
+This plan addresses the four remaining output quality issues identified by running the 1,948-page XJ service manual through the pipeline. The previous three-phase implementation (skip list, metadata enrichment, boundary filtering, cross-entry merge) is complete with 349 tests passing. This plan builds on that foundation to reach QA-passing output quality.
 
-**Strategy:** Fix the highest-impact, lowest-risk items first. Phase 1 handles the quick wins (skip list + metadata wiring + pattern tightening). Phase 2 adds the structural fix (cross-entry merge). Phase 3 adds the generalizable boundary filtering. Each phase is independently valuable and leaves the pipeline in a better state.
+**Strategy:** Phase 1 adds the mandatory known_ids filter (schema + code). Phase 2 creates the production XJ profile with complete configuration. Phase 3 fixes the cross-reference namespace mismatch. Phase 4 validates end-to-end and tunes iteratively. Phases 1 and 3 are independent and can run in parallel. Phase 2 depends on Phase 1. Phase 4 depends on all prior phases.
 
-**Validation approach:** After each phase, re-run the full XJ pipeline and measure:
-- Total chunk count (target: <5,000 from current 25,130)
-- Tiny chunk percentage (target: <10% from current 61.6%)
-- Metadata population rate (target: >90% of chunks with relevant safety/figure data populated)
+**Validation approach:** After Phase 4, re-run the full XJ pipeline and confirm:
+- L1 boundaries drop from ~2,748 to ~55
+- L3 boundaries increase from 82 to 500+
+- Cross-ref errors drop from 113 to 0
+- known_ids warnings drop from 1,716 to <20
+- QA passed: True
 
 ### Phase Summary Table
 
 | Phase | Focus Area | Key Deliverables | Est. Tokens | Dependencies |
 |-------|------------|------------------|-------------|--------------|
-| 1 | Quick Wins | Skip sections, metadata enrichment, pattern tightening | ~60K | None |
-| 2 | Chunk Merging | Cross-entry merge pass, merge threshold tuning | ~60K | Phase 1 (pattern fix reduces noise before merging) |
-| 3 | Boundary Intelligence | Post-detection filtering, schema extensions, contextual validation | ~60K | Phase 1 (patterns must be baselined first) |
+| 1 | Mandatory known_ids filter | Schema field, dataclass field, filter pass, 5 tests | ~25K | None |
+| 2 | Production XJ profile | Complete profile YAML, L2/L3/L4 patterns, profile regression test | ~30K | Phase 1 |
+| 3 | Cross-ref namespace fix | Qualify refs, downgrade skip_section refs, 5 tests | ~20K | None |
+| 4 | End-to-end validation | Pipeline run, metric comparison, iterative tuning | ~25K | Phases 1-3 |
 
 ---
 
-## Phase 1: Quick Wins — Skip List, Metadata, Patterns
+## Phase 1: Mandatory known_ids Filter
 
-**Estimated Effort:** ~60,000 tokens (including testing/fixes)
+**Estimated Effort:** ~25,000 tokens (including testing/fixes)
 **Dependencies:** None
-**Parallelizable:** 1.1, 1.2, 1.3 are independent and can run concurrently
+**Parallelizable:** Yes — can run concurrently with Phase 3
 
 ### Goals
-
-- Eliminate wiring diagram noise (46% of junk chunks)
-- Populate safety callout, figure reference, and cross-reference metadata
-- Tighten hierarchy patterns to reject single-word false positives
+- Add `require_known_id` support to the profile schema, dataclass, and boundary filter
+- When enabled, L1 boundaries with unrecognized IDs are dropped during `filter_boundaries()`
+- Zero behavior change for existing profiles and tests
 
 ### Work Items
 
-#### 1.1 Add Section Skip List
+#### 1.1 Schema: Add `require_known_id` Property
 
-**Recommendation Ref:** Q5
-**Files Affected:**
-- `src/pipeline/profile.py` (modify — add `skip_sections` field to `ManualProfile`, load from YAML)
-- `src/pipeline/chunk_assembly.py` (modify — add skip filter in `assemble_chunks()`)
-- `tests/fixtures/xj_1999_profile.yaml` (modify — add `skip_sections: ["8W"]`)
-- `tests/test_chunk_assembly.py` (modify — add skip list tests)
-- `tests/test_profile.py` (modify — add skip_sections loading test)
-- `schema/manual_profile_v1.schema.json` (modify — add skip_sections property)
+**Recommendation Ref:** Q1
+**Files Affected:** `schema/manual_profile_v1.schema.json`
 
 **Description:**
-Add `skip_sections` field to `ManualProfile` that lists level-1 section IDs to exclude from chunk assembly. When processing manifest entries, skip any entry whose chunk_id starts with a skipped section prefix.
-
-**Tasks:**
-1. [ ] Add `skip_sections: list[str] = field(default_factory=list)` to `ManualProfile` dataclass
-2. [ ] Update `load_profile()` to read `data.get("skip_sections", [])` and populate the field
-3. [ ] Add `skip_sections` to schema JSON
-4. [ ] In `assemble_chunks()`, add early `continue` for entries matching skip list:
-   ```python
-   skip_prefixes = [f"{manual_id}::{s}" for s in profile.skip_sections]
-   # In the entry loop:
-   if any(entry.chunk_id.startswith(p) for p in skip_prefixes):
-       continue
-   ```
-5. [ ] Add `skip_sections: ["8W"]` to `tests/fixtures/xj_1999_profile.yaml`
-6. [ ] Add test: profile with skip_sections, verify skipped entries produce zero chunks
-7. [ ] Add test: profile without skip_sections, verify all entries processed (backward compat)
-8. [ ] Run full test suite — all 349 tests must pass
+Add `require_known_id` boolean property to the hierarchy level item in the JSON Schema, with `default: false`.
 
 **Acceptance Criteria:**
-- [ ] `skip_sections` field loads from profile YAML
-- [ ] Entries in skipped sections produce no chunks
-- [ ] Existing profiles without `skip_sections` work unchanged
-- [ ] All tests pass
+- [ ] Property appears in hierarchy level item properties
+- [ ] Default is `false`
+- [ ] Description explains behavior
+- [ ] Existing profiles validate without changes
 
 ---
 
-#### 1.2 Add Metadata Enrichment Function
+#### 1.2 Dataclass: Add Field to `HierarchyLevel`
 
-**Recommendation Ref:** Q6, Q7, Q8, Q9
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — add `enrich_chunk_metadata()`, call in `assemble_chunks()`)
-- `tests/test_chunk_assembly.py` (modify — add enrichment tests)
+**Recommendation Ref:** Q1
+**Files Affected:** `src/pipeline/profile.py`
 
 **Description:**
-Create `enrich_chunk_metadata()` function that scans chunk text for safety callouts, figure references, and cross-references, then stores results in the metadata dict. Call this for each final chunk in `assemble_chunks()`.
-
-**Tasks:**
-1. [ ] Add `enrich_chunk_metadata(text, metadata, profile)` function:
-   - Run `detect_safety_callouts(text, profile)` → extract unique levels → store in `metadata["has_safety_callouts"]`
-   - Run `re.findall(profile.figure_reference_pattern, text)` → deduplicate → store in `metadata["figure_references"]`
-   - Run `re.findall` for each `profile.cross_reference_patterns` → deduplicate → store in `metadata["cross_references"]`
-2. [ ] Call `enrich_chunk_metadata(chunk_text, metadata, profile)` in the chunk building loop, after constructing the metadata dict (replacing the hardcoded empty lists from `entry.has_safety_callouts` etc.)
-3. [ ] Add test: chunk with "WARNING: DO NOT..." → `has_safety_callouts: ["warning"]`
-4. [ ] Add test: chunk with "(Fig. 12)" → `figure_references: ["12"]`
-5. [ ] Add test: chunk with "Refer to Group 8A" → `cross_references: ["8A"]`
-6. [ ] Add test: chunk with no matches → all three fields are empty lists (not missing)
-7. [ ] Add test: chunk with multiple callout types → sorted list `["caution", "warning"]`
-8. [ ] Run full test suite
+Add `require_known_id: bool = False` field to the `HierarchyLevel` dataclass. Update the hierarchy parsing in `load_profile()` to read this field from the YAML dict.
 
 **Acceptance Criteria:**
-- [ ] Safety callout levels detected and stored in metadata
-- [ ] Figure reference numbers detected and stored in metadata
-- [ ] Cross-reference targets detected and stored in metadata
-- [ ] All three fields present even when empty (empty list, not missing key)
-- [ ] All tests pass
+- [ ] Field exists on `HierarchyLevel` with default `False`
+- [ ] `load_profile()` reads `require_known_id` from YAML
+- [ ] Existing profiles load without changes (field defaults to `False`)
 
 ---
 
-#### 1.3 Tighten Hierarchy Patterns in XJ Profile
+#### 1.3 Parser: Enforce in `filter_boundaries()`
 
-**Recommendation Ref:** Q1, Q2
-**Files Affected:**
-- `tests/fixtures/xj_1999_profile.yaml` (modify — update level 2 and 3 patterns)
-- `tests/test_structural_parser.py` (modify — update or add pattern matching tests)
+**Recommendation Ref:** Q1
+**Files Affected:** `src/pipeline/structural_parser.py`
 
 **Description:**
-Update the XJ profile's level 2 (section) and level 3 (procedure) patterns to require multi-word headings, rejecting single-word OCR artifacts.
+Add Pass 0 to `filter_boundaries()` — before the existing blank-line, gap, and content-words passes. For levels where `require_known_id` is `True` and `known_ids` is non-empty, reject any boundary whose extracted ID is not in the known set. Boundaries with `id=None` are also rejected.
 
-**Tasks:**
-1. [ ] First, extract actual section and procedure headings from the XJ pipeline output to build a validation set:
-   ```python
-   # Run against current output to find real headings vs false positives
-   # Real section headings: "GENERAL INFORMATION", "COOLING SYSTEM", etc.
-   # False positives: "SWITCH", "LAMP", "RELAY", etc.
-   ```
-2. [ ] Update level 2 patterns to require 2+ uppercase words:
-   ```yaml
-   id_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
-   title_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z]+)+)$"
-   ```
-3. [ ] Update level 3 pattern to require 2+ words or minimum 10 chars:
-   ```yaml
-   title_pattern: "^([A-Z][A-Z]+(?:\\s+[A-Z][A-Z \\-\\/\\(\\)]+)+)$"
-   ```
-4. [ ] Validate the new patterns against the extracted heading set — ensure zero false negatives for real headings
-5. [ ] Update tests in `test_structural_parser.py` that use the XJ profile patterns
-6. [ ] Run full test suite
+```python
+# --- Pass 0: require_known_id ---
+known_id_sets: dict[int, set[str]] = {}
+for h in profile.hierarchy:
+    if h.require_known_id and h.known_ids:
+        known_id_sets[h.level] = {entry["id"] for entry in h.known_ids}
+
+if known_id_sets:
+    filtered = []
+    for b in boundaries:
+        if b.level in known_id_sets:
+            if b.id is None or b.id not in known_id_sets[b.level]:
+                continue  # rejected: ID not in known set
+        filtered.append(b)
+    boundaries = filtered
+```
 
 **Acceptance Criteria:**
-- [ ] Level 2 pattern rejects single-word lines (SWITCH, RELAY, etc.)
-- [ ] Level 2 pattern matches real section headings (GENERAL INFORMATION, COOLING SYSTEM, etc.)
-- [ ] Level 3 pattern rejects short fragments
-- [ ] Level 3 pattern matches real procedure headings (REMOVAL AND INSTALLATION, etc.)
-- [ ] All tests pass
+- [ ] Pass 0 runs before existing passes
+- [ ] Only affects levels with `require_known_id: True` AND non-empty `known_ids`
+- [ ] Boundaries at unaffected levels pass through untouched
+- [ ] `id=None` boundaries are rejected when filter is active
+
+---
+
+#### 1.4 Tests
+
+**Recommendation Ref:** Q1
+**Files Affected:** `tests/test_structural_parser.py`
+
+**Description:**
+Add `TestRequireKnownId` test class with 5 tests:
+
+1. `test_require_known_id_rejects_unknown` — profile with `require_known_id: true` and known_ids `["7", "9"]`. Boundaries with IDs `"7"`, `"9"`, `"42"`, `"1999"`. Assert only `"7"` and `"9"` survive.
+2. `test_require_known_id_false_passes_all` — same boundaries, `require_known_id: false`. All pass.
+3. `test_require_known_id_empty_known_ids_passes_all` — `require_known_id: true`, empty `known_ids`. All pass (guard clause).
+4. `test_require_known_id_none_id_rejected` — boundary with `id=None`, `require_known_id: true`. Rejected.
+5. `test_require_known_id_only_affects_configured_level` — L1 has `require_known_id: true`, L2 does not. L2 boundaries pass through.
+
+**Acceptance Criteria:**
+- [ ] All 5 new tests pass
+- [ ] All 349 existing tests still pass
 
 ---
 
 ### Phase 1 Testing Requirements
-
-- [ ] Skip list functionality tested (skip, no-skip, backward compat)
-- [ ] Metadata enrichment tested for all three field types + edge cases
-- [ ] Pattern changes validated against real headings
-- [ ] All 349+ existing tests pass
-- [ ] New tests added: ~12-15
-
-### Phase 1 Validation
-
-After all work items complete, re-run the XJ pipeline and measure:
-```bash
-pipeline -v process --profile tests/fixtures/xj_1999_profile.yaml \
-  --pdf "data/99 XJ Service Manual.pdf" --output-dir output/
-```
-
-**Expected improvements:**
-- Chunk count: ~25,130 → ~8,000-12,000 (8W elimination + fewer false boundaries)
-- Tiny chunks (≤5 words): 61.6% → ~30-40% (pattern fix helps, but cross-entry merge needed for full fix)
-- Metadata: 0 safety/figure/xref → populated on relevant chunks
+- [ ] Schema validates profiles with the new field
+- [ ] Existing test suite passes (349 tests) — `require_known_id` defaults to `false`
+- [ ] 5 new unit tests pass
+- [ ] `pytest -v --tb=short` — all green
 
 ### Phase 1 Completion Checklist
-
-- [ ] All work items complete
-- [ ] All tests passing (`pytest -v --tb=short`)
-- [ ] XJ pipeline re-run shows measurable improvement
+- [ ] All work items complete (1.1-1.4)
+- [ ] Tests passing (354 total)
 - [ ] No regressions introduced
 
 ---
 
-## Phase 2: Cross-Entry Chunk Merging
+## Phase 2: Production XJ Profile
 
-**Estimated Effort:** ~60,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (pattern tightening reduces noise — merging works better on cleaner boundaries)
-**Parallelizable:** 2.1 and 2.2 are sequential (merge function first, then tuning)
+**Estimated Effort:** ~30,000 tokens (including testing/fixes)
+**Dependencies:** Phase 1 (need `require_known_id` field)
+**Parallelizable:** No — sequential with Phase 1
 
 ### Goals
-
-- Merge undersized chunks across manifest entry boundaries
-- Reduce tiny chunk percentage to <10%
-- Produce chunks in the 200-2000 word target range
+- Create `profiles/xj-1999.yaml` with complete known_ids, tuned patterns, and relaxed L3 filters
+- Keep test fixture `tests/fixtures/xj_1999_profile.yaml` unchanged
+- Add profile regression test
 
 ### Work Items
 
-#### 2.1 Implement Cross-Entry Merge Function
+#### 2.1 Create Production Profile
 
-**Recommendation Ref:** Q4
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — add `merge_small_across_entries()`, call in `assemble_chunks()`)
-- `tests/test_chunk_assembly.py` (modify — add merge tests)
+**Recommendation Ref:** Q2, Q5
+**Files Affected:** `profiles/xj-1999.yaml` (new)
 
 **Description:**
-Add a post-assembly merge pass that iterates the full chunk list and merges any chunk below `min_tokens` into its next sibling within the same level-1 group. Run multiple passes until stable.
+Copy from `tests/fixtures/xj_1999_profile.yaml` and apply all changes:
 
-**Tasks:**
-1. [ ] Add `merge_small_across_entries(chunks: list[Chunk], min_tokens: int = 200) -> list[Chunk]`:
-   - Iterate chunks left to right
-   - For each chunk with `count_tokens(text) < min_tokens`:
-     - If next chunk exists and has same `level1_id`: prepend current text to next chunk's text
-     - Otherwise: keep as-is (group boundary or last chunk)
-   - Run until no merges occur (convergence loop, max 10 passes)
-2. [ ] Handle metadata merge: when absorbing a small chunk, the absorbing chunk keeps its own metadata. Optionally concatenate `hierarchy_path` breadcrumbs.
-3. [ ] Call `merge_small_across_entries(result_chunks)` at end of `assemble_chunks()` before return
-4. [ ] Add logging: `logger.debug("Cross-entry merge: %d → %d chunks", before, after)`
-5. [ ] Add test: 5 chunks of [10, 5, 300, 8, 400] words → merge produces [315, 408] (tiny chunks absorbed into next sibling)
-6. [ ] Add test: chunks spanning level1 boundary → no merge across boundary
-7. [ ] Add test: single tiny chunk at end of group → kept as-is (no next sibling to merge into)
-8. [ ] Add test: convergence — chain of tiny chunks all merge in sequence
-9. [ ] Run full test suite
+1. **Complete known_ids list** (~39 groups from XJ Tab Locator):
+   ```yaml
+   known_ids:
+     - { id: "IN", title: "Introduction" }
+     - { id: "0", title: "Lubrication and Maintenance" }
+     - { id: "2", title: "Suspension" }
+     - { id: "3", title: "Differential and Driveline" }
+     - { id: "5", title: "Brakes" }
+     - { id: "6", title: "Clutch" }
+     - { id: "7", title: "Cooling System" }
+     - { id: "8A", title: "Battery" }
+     - { id: "8B", title: "Starting System" }
+     - { id: "8C", title: "Charging System" }
+     - { id: "8D", title: "Ignition System" }
+     - { id: "8E", title: "Instrument Panel Systems" }
+     - { id: "8F", title: "Audio Systems" }
+     - { id: "8G", title: "Horn Systems" }
+     - { id: "8H", title: "Vehicle Speed Control System" }
+     - { id: "8J", title: "Turn Signal and Hazard Warning Systems" }
+     - { id: "8K", title: "Wiper and Washer Systems" }
+     - { id: "8L", title: "Lamps" }
+     - { id: "8M", title: "Passive Restraint Systems" }
+     - { id: "8N", title: "Electrically Heated Systems" }
+     - { id: "8O", title: "Power Distribution Systems" }
+     - { id: "8P", title: "Power Lock Systems" }
+     - { id: "8Q", title: "Vehicle Theft/Security Systems" }
+     - { id: "8R", title: "Power Seats Systems" }
+     - { id: "8S", title: "Power Window Systems" }
+     - { id: "8T", title: "Power Mirror Systems" }
+     - { id: "8U", title: "Chime/Buzzer Warning Systems" }
+     - { id: "8V", title: "Overhead Console Systems" }
+     - { id: "8W", title: "Wiring Diagrams" }
+     - { id: "9", title: "Engine" }
+     - { id: "11", title: "Exhaust System and Intake Manifold" }
+     - { id: "13", title: "Frame and Bumpers" }
+     - { id: "14", title: "Fuel System" }
+     - { id: "19", title: "Steering" }
+     - { id: "21", title: "Transmission and Transfer Case" }
+     - { id: "22", title: "Tires and Wheels" }
+     - { id: "23", title: "Body" }
+     - { id: "24", title: "Heating and Air Conditioning" }
+     - { id: "25", title: "Emission Control Systems" }
+   ```
+
+2. **Set `require_known_id: true`** on L1 hierarchy level.
+
+3. **L2 pattern — add negative lookahead** for procedure keywords:
+   ```yaml
+   id_pattern: "^(?!REMOVAL|INSTALLATION|REMOVAL AND INSTALLATION|DIAGNOSIS|DIAGNOSIS AND TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY|ASSEMBLY|DISASSEMBLY AND ASSEMBLY|CLEANING|INSPECTION|CLEANING AND INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|TESTING|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)([A-Z]{2,}(?:\\s+[A-Z]{2,})+)$"
+   ```
+
+4. **L3 pattern — closed vocabulary**:
+   ```yaml
+   title_pattern: "^(REMOVAL AND INSTALLATION|REMOVAL|INSTALLATION|DIAGNOSIS AND TESTING|DIAGNOSIS|TESTING|DESCRIPTION AND OPERATION|SERVICE PROCEDURES|DISASSEMBLY AND ASSEMBLY|DISASSEMBLY|ASSEMBLY|CLEANING AND INSPECTION|CLEANING|INSPECTION|ADJUSTMENT|ADJUSTMENTS|OVERHAUL|SPECIFICATIONS|SPECIAL TOOLS|TORQUE CHART|TORQUE SPECIFICATIONS)$"
+   min_gap_lines: 0
+   min_content_words: 3
+   require_blank_before: false
+   ```
+
+5. **L4 pattern — broader component matching**:
+   ```yaml
+   title_pattern: "^([A-Z][A-Z][A-Z \\-/]{1,}(?:\\([A-Z0-9\\. ]+\\))?)$"
+   min_content_words: 3
+   ```
 
 **Acceptance Criteria:**
-- [ ] Chunks below `min_tokens` are merged into next sibling
-- [ ] Level-1 group boundaries are respected
-- [ ] Multiple passes converge (no infinite loop)
-- [ ] Merged chunks maintain valid metadata
-- [ ] All tests pass
+- [ ] Profile passes schema validation
+- [ ] All regex patterns compile without error
+- [ ] known_ids count >= 35
+- [ ] `require_known_id: true` is set on L1
 
 ---
 
-#### 2.2 Tune Merge Thresholds and Validate
+#### 2.2 Add Profile Regression Test
 
-**Recommendation Ref:** Q4 (tuning)
-**Files Affected:**
-- `src/pipeline/chunk_assembly.py` (modify — adjust thresholds if needed)
-- `tests/test_chunk_assembly.py` (modify — add validation tests)
+**Recommendation Ref:** D2
+**Files Affected:** `tests/test_profile.py`
 
 **Description:**
-After implementing the merge function, run the full XJ pipeline and analyze the output to tune the `min_tokens` threshold. The goal is <10% tiny chunks while not creating oversized merged chunks.
-
-**Tasks:**
-1. [ ] Run XJ pipeline with `min_tokens=200`, measure chunk size distribution
-2. [ ] If too many tiny chunks remain, try `min_tokens=100` (more aggressive merging)
-3. [ ] If merged chunks are too large (>2000 tokens), add a max-merge-size guard:
-   ```python
-   merged_tokens = count_tokens(chunk.text + "\n\n" + next_chunk.text)
-   if merged_tokens > 2000:
-       result.append(chunk)  # Don't merge — would exceed size target
-   ```
-4. [ ] Document final threshold choice in code comment
-5. [ ] Add test: merge doesn't create chunks exceeding 2000 tokens
-6. [ ] Run full test suite
+Add an integration test that loads `profiles/xj-1999.yaml`, validates it, compiles all regex patterns, and asserts basic invariants.
 
 **Acceptance Criteria:**
-- [ ] Tiny chunk percentage <10%
-- [ ] No merged chunks exceed 2000 tokens
-- [ ] Threshold documented
-- [ ] All tests pass
+- [ ] Production profile loads successfully
+- [ ] Profile passes `validate_profile()` with no errors
+- [ ] All regex patterns compile
+- [ ] known_ids count >= 35
+- [ ] L1 has `require_known_id: True`
+- [ ] L3 title_pattern contains "REMOVAL"
 
 ---
 
 ### Phase 2 Testing Requirements
-
-- [ ] Cross-entry merge logic tested with various chunk size distributions
-- [ ] Group boundary respect tested
-- [ ] Convergence loop tested (no infinite loop)
-- [ ] Max-merge-size guard tested
-- [ ] All 349+ existing tests pass
-- [ ] New tests added: ~8-10
-
-### Phase 2 Validation
-
-After completion, re-run XJ pipeline and measure:
-- Chunk count: should drop to ~3,000-5,000
-- Tiny chunks (≤5 words): should drop to <10%
-- Average chunk size: should be 50-200 words
-- Max chunk size: should stay ≤2,000 words
+- [ ] Production profile loads and validates
+- [ ] Regression test passes
+- [ ] All 354+ existing tests still pass
+- [ ] Profile is ready for end-to-end validation in Phase 4
 
 ### Phase 2 Completion Checklist
-
-- [ ] All work items complete
+- [ ] `profiles/xj-1999.yaml` created
+- [ ] Profile regression test added
 - [ ] All tests passing
-- [ ] XJ pipeline produces <10% tiny chunks
-- [ ] Chunk size distribution in target range
 - [ ] No regressions introduced
 
 ---
 
-## Phase 3: Boundary Intelligence
+## Phase 3: Cross-Reference Namespace Fix
 
-**Estimated Effort:** ~60,000 tokens (including testing/fixes)
-**Dependencies:** Phase 1 (patterns must be baselined before adding filtering logic)
-**Parallelizable:** 3.1 and 3.2 are sequential; 3.3 is independent
+**Estimated Effort:** ~20,000 tokens (including testing/fixes)
+**Dependencies:** None — independent of Phases 1 and 2
+**Parallelizable:** Yes — can run concurrently with Phase 1
 
 ### Goals
-
-- Add configurable boundary post-filtering to catch remaining false positives
-- Make the filtering generalizable to other manual profiles (CJ, TM9)
-- Add boundary validation diagnostics for profile tuning
+- Fix the 100% cross-reference validation failure caused by bare group numbers
+- Downgrade references to skipped sections from error to warning
+- Maintain backward compatibility
 
 ### Work Items
 
-#### 3.1 Add Boundary Filter Configuration to Schema
+#### 3.1 Qualify Cross-References at Creation Time
 
 **Recommendation Ref:** Q3
-**Files Affected:**
-- `src/pipeline/profile.py` (modify — add filter fields to `HierarchyLevel`)
-- `schema/manual_profile_v1.schema.json` (modify — add filter properties)
-- `tests/test_profile.py` (modify — add loading tests for new fields)
+**Files Affected:** `src/pipeline/chunk_assembly.py`
 
 **Description:**
-Add optional boundary filtering fields to the `HierarchyLevel` dataclass: `min_gap_lines`, `min_content_words`, `require_blank_before`. These configure the post-detection filter in 3.2.
+In `enrich_chunk_metadata()`, after collecting cross-reference matches, qualify them with `{manual_id}::` prefix:
 
-**Tasks:**
-1. [ ] Add fields to `HierarchyLevel`:
-   ```python
-   min_gap_lines: int = 0          # 0 = disabled
-   min_content_words: int = 0      # 0 = disabled
-   require_blank_before: bool = False
-   ```
-2. [ ] Update `load_profile()` to read these fields from YAML
-3. [ ] Add to schema JSON with default values
-4. [ ] Add test: profile with filter fields loads correctly
-5. [ ] Add test: profile without filter fields loads with defaults (backward compat)
-6. [ ] Run full test suite
+```python
+# AFTER existing xref collection (line 744-748)
+manual_id = metadata.get("manual_id", "")
+if manual_id:
+    xref_matches = [f"{manual_id}::{ref}" for ref in xref_matches]
+metadata["cross_references"] = sorted(set(xref_matches))
+```
 
 **Acceptance Criteria:**
-- [ ] Filter fields load from YAML
-- [ ] Defaults are disabled (no change to existing behavior)
-- [ ] Schema validates
-- [ ] All tests pass
+- [ ] Cross-references include `{manual_id}::` prefix
+- [ ] Empty `manual_id` falls back to bare references (no crash)
+- [ ] Deduplication still works after qualification
 
 ---
 
-#### 3.2 Implement Boundary Post-Filter
+#### 3.2 Downgrade Skip-Section References to Warning
 
 **Recommendation Ref:** Q3
-**Files Affected:**
-- `src/pipeline/structural_parser.py` (modify — add `filter_boundaries()` function)
-- `src/pipeline/cli.py` (modify — call filter after detect_boundaries)
-- `tests/test_structural_parser.py` (modify — add filter tests)
+**Files Affected:** `src/pipeline/qa.py`
 
 **Description:**
-Add `filter_boundaries()` that takes detected boundaries, the profile, and cleaned page text, and removes boundaries that fail the configured filters.
+Add `profile` parameter to `check_cross_ref_validity()`. When a cross-reference target matches a skipped section prefix, emit a warning instead of an error. Update `run_validation_suite()` to pass `profile`.
 
-**Tasks:**
-1. [ ] Add `filter_boundaries(boundaries, profile, pages) -> list[Boundary]`:
-   - **min_gap_lines**: For each level with `min_gap_lines > 0`, iterate boundaries at that level. If the gap (in lines) between consecutive same-level boundaries is less than `min_gap_lines`, remove the second one.
-   - **min_content_words**: For each boundary, count words between it and the next boundary. If below `min_content_words`, remove the boundary.
-   - **require_blank_before**: For each level with `require_blank_before = True`, check if the boundary line is preceded by a blank line (in the page text). If not, remove the boundary.
-2. [ ] Call `filter_boundaries()` in `cmd_process()` and `cmd_validate()` between `detect_boundaries()` and `build_manifest()`
-3. [ ] Add logging: `logger.info("Boundary filter: %d → %d boundaries", before, after)`
-4. [ ] Add test: back-to-back boundaries with `min_gap_lines=3` → second removed
-5. [ ] Add test: boundary with 2 words content and `min_content_words=5` → removed
-6. [ ] Add test: boundary without preceding blank line and `require_blank_before=True` → removed
-7. [ ] Add test: all filters disabled → boundaries unchanged (backward compat)
-8. [ ] Run full test suite
+```python
+def check_cross_ref_validity(
+    chunks: list[Chunk],
+    profile: ManualProfile | None = None,
+) -> list[ValidationIssue]:
+    # ... existing logic ...
+
+    skip_prefixes: set[str] = set()
+    if profile and profile.skip_sections:
+        manual_id = chunks[0].manual_id if chunks else ""
+        for sid in profile.skip_sections:
+            skip_prefixes.add(f"{manual_id}::{sid}")
+
+    for chunk in chunks:
+        for ref in chunk.metadata.get("cross_references", []):
+            if ref not in all_chunk_ids and ref not in all_prefixes:
+                is_skipped = any(ref.startswith(sp) for sp in skip_prefixes)
+                issues.append(
+                    ValidationIssue(
+                        check="cross_ref_validity",
+                        severity="warning" if is_skipped else "error",
+                        chunk_id=chunk.chunk_id,
+                        message=f"Cross-reference target not found: '{ref}'"
+                            + (" (skipped section)" if is_skipped else ""),
+                        details={"target": ref, "skipped": is_skipped},
+                    )
+                )
+```
 
 **Acceptance Criteria:**
-- [ ] Minimum gap filter removes back-to-back boundaries
-- [ ] Minimum content filter removes empty/trivial boundaries
-- [ ] Blank-line-before filter removes mid-paragraph matches
-- [ ] All filters disabled by default
-- [ ] All tests pass
+- [ ] `check_cross_ref_validity()` accepts optional `profile` parameter
+- [ ] References to skipped sections produce warnings, not errors
+- [ ] References to non-skipped missing targets still produce errors
+- [ ] `run_validation_suite()` passes `profile` to the function
+- [ ] Backward compatible — `profile=None` produces errors for all unresolved refs
 
 ---
 
-#### 3.3 Add Boundary Diagnostics Command
+#### 3.3 Tests
 
-**Recommendation Ref:** Q3 (tooling)
-**Files Affected:**
-- `src/pipeline/cli.py` (modify — add `diagnose` subcommand or enhance `validate`)
+**Recommendation Ref:** Q3
+**Files Affected:** `tests/test_qa.py`, `tests/test_chunk_assembly.py`
 
 **Description:**
-Add diagnostic output to help tune boundary patterns and filters. When running `pipeline validate`, output a boundary quality summary: total boundaries, boundaries per page, content size distribution between boundaries, suspected false positives.
+Add 5 tests across two files:
 
-**Tasks:**
-1. [ ] Add boundary diagnostics section to `cmd_validate()` output:
-   ```
-   Boundary diagnostics:
-     Total boundaries: 24,473
-     Boundaries per page: 12.5 avg
-     Content between boundaries: min=0, median=3, avg=25, max=2000 words
-     Suspected false positives (≤3 words between): 15,200 (62%)
-     Level distribution: group=2873, section=13109, procedure=9095, sub-procedure=53
-   ```
-2. [ ] Add `--diagnostics` flag to `validate` subcommand for verbose boundary analysis
-3. [ ] Optionally: dump suspected false-positive boundaries to a TSV file for manual review
-4. [ ] Add test: diagnostics output is generated without errors
-5. [ ] Run full test suite
+**`tests/test_qa.py`:**
+1. `test_cross_ref_qualified_resolves` — chunk with `cross_references: ["xj-1999::7"]` and a chunk with ID starting with `xj-1999::7`. No error.
+2. `test_cross_ref_bare_id_fails` — chunk with `cross_references: ["7"]`. Error emitted.
+3. `test_cross_ref_skipped_section_is_warning` — chunk with `cross_references: ["xj-1999::8W"]`, profile with `skip_sections: ["8W"]`. Warning, not error.
+
+**`tests/test_chunk_assembly.py`:**
+4. `test_enrich_cross_refs_qualified` — text with "Refer to Group 7", profile with `manual_id: "xj-1999"`. Assert `metadata["cross_references"] == ["xj-1999::7"]`.
+5. `test_enrich_cross_refs_deduped` — text with "Refer to Group 7" twice. Assert single entry.
 
 **Acceptance Criteria:**
-- [ ] `pipeline validate --diagnostics` shows boundary quality metrics
-- [ ] False-positive rate is calculated and displayed
-- [ ] Level distribution is shown
-- [ ] All tests pass
+- [ ] All 5 new tests pass
+- [ ] All existing cross-ref tests still pass
+- [ ] Total test count increases by 5
 
 ---
 
 ### Phase 3 Testing Requirements
-
-- [ ] Filter configuration loads and defaults correctly
-- [ ] Each filter type tested independently
-- [ ] Combined filters tested
-- [ ] Backward compatibility verified (all filters disabled)
-- [ ] Diagnostics output tested
-- [ ] All 349+ existing tests pass
-- [ ] New tests added: ~10-15
-
-### Phase 3 Validation
-
-After completion, re-run XJ pipeline with tuned filters and measure:
-- Expected boundary count: ~3,000-5,000 (from 24,473)
-- Expected chunk count: ~2,000-4,000
-- Expected tiny chunks: <5%
+- [ ] Cross-ref qualification tested in chunk_assembly
+- [ ] Skip-section downgrade tested in qa
+- [ ] Backward compatibility verified (profile=None)
+- [ ] All 354+ existing tests pass
 
 ### Phase 3 Completion Checklist
-
-- [ ] All work items complete
-- [ ] All tests passing
-- [ ] XJ pipeline produces high-quality chunks suitable for RAG
-- [ ] Boundary diagnostics help with profile tuning
-- [ ] CLAUDE.md updated with new profile fields and CLI flags
+- [ ] Cross-refs qualified at creation time
+- [ ] Skip-section refs downgraded to warning
+- [ ] 5 new tests passing
 - [ ] No regressions introduced
+
+---
+
+## Phase 4: End-to-End Validation
+
+**Estimated Effort:** ~25,000 tokens (including iterative tuning)
+**Dependencies:** Phases 1, 2, and 3 (all must be complete)
+**Parallelizable:** No — final integration validation
+
+### Goals
+- Run the full pipeline with the production profile and confirm all metrics improve
+- Iteratively tune the production profile based on results
+- Achieve QA passing status
+
+### Work Items
+
+#### 4.1 Run Pipeline
+
+**Recommendation Ref:** All
+**Files Affected:** None (validation only)
+
+**Description:**
+```bash
+pipeline -v process \
+  --profile profiles/xj-1999.yaml \
+  --pdf "data/99 XJ Service Manual.pdf" \
+  --output-dir output/
+```
+
+**Acceptance Criteria:**
+- [ ] Pipeline completes without errors
+
+---
+
+#### 4.2 Run Validation with Diagnostics
+
+**Recommendation Ref:** All
+**Files Affected:** None (validation only)
+
+**Description:**
+```bash
+pipeline -v validate \
+  --profile profiles/xj-1999.yaml \
+  --pdf "data/99 XJ Service Manual.pdf" \
+  --diagnostics
+```
+
+**Acceptance Criteria:**
+- [ ] Validation completes
+- [ ] Diagnostics output shows improved boundary distribution
+
+---
+
+#### 4.3 Compare Metrics
+
+**Recommendation Ref:** All
+
+**Description:**
+Compare pipeline output against baseline:
+
+| Metric | Before | Target |
+|--------|--------|--------|
+| Total chunks | 2,408 | 1,500-2,500 |
+| L1 boundaries | 2,748 | ~55 |
+| L2 boundaries | 3,432 | ~200-400 |
+| L3 boundaries | 82 | 500+ |
+| L4 boundaries | 53 | 200+ |
+| Undersized chunks (<100 tok) | 637 (26%) | <10% |
+| Cross-ref errors | 113 | 0 |
+| Cross-ref warnings (8W) | 0 | ~3 |
+| known_ids warnings | 1,716 | <20 |
+| False-positive boundaries (<=3 words) | 17% | <5% |
+| QA passed | False | True |
+
+**Acceptance Criteria:**
+- [ ] All metrics improve or stay within acceptable range
+- [ ] QA passes (zero errors)
+
+---
+
+#### 4.4 Iterative Tuning
+
+**Recommendation Ref:** Q2, Q5
+
+**Description:**
+After the first run, review output for:
+- Missing `a`-suffixed group variants — add to known_ids if discovered
+- L3 procedure keywords not in the closed vocabulary — add to pattern
+- L4 false positives from overly broad component pattern — tighten if needed
+- Remaining undersized chunks — identify patterns and address
+
+**Acceptance Criteria:**
+- [ ] All discovered variants added to profile
+- [ ] No systematic false-positive patterns remain
+
+---
+
+#### 4.5 Run Full Test Suite
+
+**Recommendation Ref:** All
+
+**Description:**
+```bash
+pytest -v --tb=short
+```
+
+All 349 existing tests plus ~10 new tests from Phases 1 and 3 must pass.
+
+**Acceptance Criteria:**
+- [ ] All tests pass (expected: 359+)
+- [ ] No regressions
+
+---
+
+### Phase 4 Completion Checklist
+- [ ] Pipeline runs end-to-end with production profile
+- [ ] All metric targets met or close
+- [ ] QA passes
+- [ ] Full test suite green
+- [ ] Profile tuned based on iterative findings
 
 ---
 
 ## Parallel Work Opportunities
 
-Phase 1 work items are fully independent — all three can execute concurrently:
+Phases 1 and 3 are fully independent and can execute concurrently:
 
 | Work Item | Can Run With | Notes |
 |-----------|--------------|-------|
-| 1.1 (skip list) | 1.2, 1.3 | Different files: profile.py + assembly vs. assembly metadata vs. YAML |
-| 1.2 (metadata enrichment) | 1.1, 1.3 | Only touches chunk_assembly.py metadata section |
-| 1.3 (patterns) | 1.1, 1.2 | Only touches YAML profile + parser tests |
-| 2.1 (merge function) | — | Must complete before 2.2 |
-| 2.2 (tuning) | — | Depends on 2.1 |
-| 3.1 (schema) | — | Must complete before 3.2 |
-| 3.2 (filter) | 3.3 | Filter implementation is independent from diagnostics |
-| 3.3 (diagnostics) | 3.2 | Can develop diagnostics while filter is being built |
+| Phase 1 (known_ids filter) | Phase 3 (cross-ref fix) | Different files: profile.py + parser vs. chunk_assembly + qa |
+| 1.1 (schema) | 3.1 (qualify refs) | No file overlap |
+| 1.2 (dataclass) | 3.2 (downgrade) | Different modules |
+| 1.3 (filter) | 3.3 (tests) | Different test files |
+| 1.4 (tests) | 3.3 (tests) | Different test classes |
+| Phase 2 (profile) | — | Depends on Phase 1 |
+| Phase 4 (validation) | — | Depends on all |
 
 ---
 
@@ -449,29 +528,45 @@ Phase 1 work items are fully independent — all three can execute concurrently:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Pattern changes cause false negatives (real headings missed) | Medium | High | Extract real headings from current output as validation set before changing patterns. Test against this set. |
-| Cross-entry merge creates oversized chunks | Medium | Medium | Add max-merge-size guard (2000 token cap). Test with real pipeline output. |
-| Skip list removes content that has RAG value | Low | Medium | The 8W group is genuinely non-prose. Can always remove sections from skip list later. |
-| Boundary filter is too aggressive | Medium | Medium | All filters disabled by default. Enable incrementally with conservative thresholds. |
-| Metadata enrichment is slow on large chunks | Low | Low | Safety detection is O(lines × patterns). With ~5 patterns and chunks ≤2000 words, this is negligible. |
-| Existing tests break from pattern changes | Medium | Low | Pattern changes affect test fixtures that use the old patterns. Update fixtures alongside patterns. |
+| L4 pattern too broad, creates false positives | Medium | Medium | `min_content_words: 3` guards against empty component headers. Monitor during Phase 4, tighten if false-positive rate > 10%. |
+| `a`-suffixed group variants rejected by known_ids filter | Medium | Low | Phase 4.4 handles iteratively — discover and add during first validation run. |
+| L3 closed vocabulary misses non-standard procedure names | Low | Medium | Start with Chrysler standard keywords. Add more during Phase 4.4 if genuine procedures are missed. |
+| Test fixture changes break existing tests | Zero | — | Test fixture is NOT modified. Production profile is a separate file. |
+| Cross-ref qualification changes metadata format | Low | Low | References were previously bare — now qualified. QA validator already supports prefix matching. |
+| Pattern changes interact unexpectedly with disambiguation | Low | High | The known_ids filter runs in `filter_boundaries()` AFTER `detect_boundaries()`, not during it. Disambiguation sees the same input. Filter cleans up afterward. |
 
 ---
 
 ## Success Metrics
 
-| Metric | Current (Baseline) | Phase 1 Target | Phase 2 Target | Phase 3 Target |
-|--------|-------------------|----------------|----------------|----------------|
-| Total chunks | 25,130 | ~12,000 | ~4,000 | ~3,000 |
-| Tiny chunks (≤5 words) | 61.6% | ~35% | <10% | <5% |
-| Median chunk words | 3 | ~15 | ~80 | ~100 |
-| Safety callouts populated | 0 | ~900+ | ~900+ | ~900+ |
-| Figure refs populated | 0 | ~2,000+ | ~2,000+ | ~2,000+ |
-| Cross-refs populated | 0 | ~200+ | ~200+ | ~200+ |
-| 8W junk chunks | 11,516 | 0 | 0 | 0 |
-| All tests passing | 349 | 360+ | 370+ | 385+ |
+| Metric | Current (Baseline) | Target | Measurement |
+|--------|-------------------|--------|-------------|
+| QA passed | False | True | `pipeline validate` exit code 0 |
+| Cross-ref errors | 113 | 0 | QA report error count |
+| known_ids warnings | 1,716 | <20 | QA report warning count |
+| L1 false positives | ~2,700 | 0 | Boundary diagnostics |
+| L3 procedure detection | 82 (8%) | 500+ (target) | Boundary diagnostics level distribution |
+| Undersized chunks | 637 (26%) | <10% | Chunk size distribution |
+| Total tests | 349 | 359+ | `pytest` summary |
+
+---
+
+## Files Changed
+
+| File | Phase | Change |
+|------|-------|--------|
+| `schema/manual_profile_v1.schema.json` | 1 | Add `require_known_id` property |
+| `src/pipeline/profile.py` | 1 | Add `require_known_id` field to `HierarchyLevel` |
+| `src/pipeline/structural_parser.py` | 1 | Add known_id filtering pass (Pass 0) in `filter_boundaries()` |
+| `tests/test_structural_parser.py` | 1 | Add `TestRequireKnownId` class (5 tests) |
+| `profiles/xj-1999.yaml` | 2 | New production profile |
+| `tests/test_profile.py` | 2 | Add production profile regression test |
+| `src/pipeline/chunk_assembly.py` | 3 | Qualify cross-refs with `manual_id::` in `enrich_chunk_metadata()` |
+| `src/pipeline/qa.py` | 3 | Add `profile` param to `check_cross_ref_validity()`; downgrade skip-section refs |
+| `tests/test_qa.py` | 3 | Add cross-ref qualification tests (3 tests) |
+| `tests/test_chunk_assembly.py` | 3 | Add cross-ref enrichment tests (2 tests) |
 
 ---
 
 *Implementation plan generated by Claude on 2026-02-16*
-*Source: RECOMMENDATIONS.md (XJ pipeline output quality analysis)*
+*Based on: RECOMMENDATIONS.md + docs/plans/2026-02-16-output-quality-fixes.md*
