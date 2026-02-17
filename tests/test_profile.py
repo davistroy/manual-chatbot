@@ -607,3 +607,271 @@ class TestProductionXjProfile:
         profile = load_profile(PRODUCTION_PROFILE_PATH)
         l3 = profile.hierarchy[2]
         assert "REMOVAL" in l3.title_pattern
+
+
+CJ_PRODUCTION_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "cj-universal.yaml"
+
+
+class TestProductionCjProfile:
+    """Integration tests for the production CJ profile (profiles/cj-universal.yaml).
+
+    These tests ensure the production profile remains loadable, valid, and
+    structurally correct across code changes.
+    """
+
+    def test_production_profile_loads(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        assert isinstance(profile, ManualProfile)
+        assert profile.manual_id == "cj-universal-53-71"
+
+    def test_production_profile_validates_no_errors(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        errors = validate_profile(profile)
+        assert errors == [], f"Validation errors: {errors}"
+
+    def test_production_profile_all_patterns_compile(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        patterns = compile_patterns(profile)
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled: {p}"
+                )
+
+    def test_production_profile_known_ids_count(self):
+        """25 canonical sections plus OCR variant duplicates (D1/Dl, F1/Fl, J1/Jl)."""
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        known_ids = profile.hierarchy[0].known_ids
+        # 25 canonical sections + 3 OCR variants = 28
+        assert len(known_ids) >= 25, (
+            f"Expected >= 25 known_ids, got {len(known_ids)}"
+        )
+
+    def test_production_profile_compound_ids_present(self):
+        """Compound section IDs (D1, F1, F2, J1) and their OCR variants are present."""
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        ids = {k["id"] for k in profile.hierarchy[0].known_ids}
+        # Canonical compound IDs
+        assert "D1" in ids or "Dl" in ids, "D1/Dl missing from known_ids"
+        assert "F1" in ids or "Fl" in ids, "F1/Fl missing from known_ids"
+        assert "F2" in ids, "F2 missing from known_ids"
+        assert "J1" in ids or "Jl" in ids, "J1/Jl missing from known_ids"
+
+    def test_production_profile_all_canonical_sections(self):
+        """All 25 canonical sections A through U are present."""
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        ids = {k["id"] for k in profile.hierarchy[0].known_ids}
+        expected_single = set("ABCDEFGHIJKLMNOPQRSTU")
+        missing = expected_single - ids
+        assert not missing, f"Missing single-letter sections: {missing}"
+
+    def test_production_profile_l1_require_known_id(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].require_known_id is True
+
+    def test_production_profile_collapse_spaced_chars(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        assert profile.ocr_cleanup.collapse_spaced_chars is True
+
+    def test_production_profile_has_regex_substitutions(self):
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        assert len(profile.ocr_cleanup.regex_substitutions) > 0
+
+    def test_production_profile_no_l4_level(self):
+        """CJ profile should have no L4 (per plan: step_patterns handle sub-steps)."""
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        assert len(profile.hierarchy) == 3, (
+            f"Expected 3 hierarchy levels, got {len(profile.hierarchy)}"
+        )
+
+    def test_production_profile_l2_has_filtering(self):
+        """L2 should have min_content_words and require_blank_before for filtering."""
+        profile = load_profile(CJ_PRODUCTION_PROFILE_PATH)
+        l2 = profile.hierarchy[1]
+        assert l2.min_content_words > 0, "L2 should have min_content_words > 0"
+        assert l2.require_blank_before is True, "L2 should require blank before"
+
+
+TM9_8014_PRODUCTION_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "tm9-8014.yaml"
+
+
+class TestProductionTm98014Profile:
+    """Integration tests for the production TM9-8014 profile (profiles/tm9-8014.yaml).
+
+    These tests ensure the production profile remains loadable, valid, and
+    structurally correct across code changes.
+    """
+
+    def test_production_profile_loads(self):
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert isinstance(profile, ManualProfile)
+        assert profile.manual_id == "tm9-8014-m38a1"
+
+    def test_production_profile_validates_no_errors(self):
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        errors = validate_profile(profile)
+        assert errors == [], f"Validation errors: {errors}"
+
+    def test_production_profile_all_patterns_compile(self):
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        patterns = compile_patterns(profile)
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled: {p}"
+                )
+
+    def test_production_profile_known_ids_count(self):
+        """4 chapter known_ids matching the manual's TOC."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        known_ids = profile.hierarchy[0].known_ids
+        assert len(known_ids) == 4, (
+            f"Expected 4 known_ids, got {len(known_ids)}"
+        )
+
+    def test_production_profile_chapter_ids_present(self):
+        """All 4 chapter IDs (1-4) are present."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        ids = {k["id"] for k in profile.hierarchy[0].known_ids}
+        expected = {"1", "2", "3", "4"}
+        missing = expected - ids
+        assert not missing, f"Missing chapter IDs: {missing}"
+
+    def test_production_profile_l1_require_known_id(self):
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].require_known_id is True
+
+    def test_production_profile_no_l4_level(self):
+        """TM9-8014 profile should have no L4 (per plan: step_patterns handle sub-steps)."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert len(profile.hierarchy) == 3, (
+            f"Expected 3 hierarchy levels (chapter/section/paragraph), got {len(profile.hierarchy)}"
+        )
+
+    def test_production_profile_l3_has_filtering(self):
+        """L3 (paragraph) should have require_blank_before and min_content_words."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        l3 = profile.hierarchy[2]
+        assert l3.require_blank_before is True, "L3 should require blank before"
+        assert l3.min_content_words > 0, "L3 should have min_content_words > 0"
+
+    def test_production_profile_expanded_ocr_substitutions(self):
+        """Profile should have substantially more OCR substitutions than the test fixture."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert len(profile.ocr_cleanup.known_substitutions) >= 20, (
+            f"Expected >= 20 OCR substitutions, got {len(profile.ocr_cleanup.known_substitutions)}"
+        )
+
+    def test_production_profile_has_regex_substitutions(self):
+        """Profile should have regex substitutions for Z/I confusion patterns."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert len(profile.ocr_cleanup.regex_substitutions) > 0, (
+            "Expected regex substitutions for Z/I confusion patterns"
+        )
+
+    def test_production_profile_ocr_quality_poor(self):
+        """OCR quality should be marked as poor for this 1950s military manual."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        assert profile.ocr_cleanup.quality_estimate == "poor"
+
+    def test_production_profile_two_vehicles(self):
+        """Profile covers both M38A1 and M170."""
+        profile = load_profile(TM9_8014_PRODUCTION_PROFILE_PATH)
+        models = {v.model for v in profile.vehicles}
+        assert "M38A1" in models, "M38A1 should be in vehicles"
+        assert "M170" in models, "M170 should be in vehicles"
+
+
+TM9_8015_2_PRODUCTION_PROFILE_PATH = Path(__file__).parent.parent / "profiles" / "tm9-8015-2.yaml"
+
+
+class TestProductionTm980152Profile:
+    """Integration tests for the production TM9-8015-2 profile (profiles/tm9-8015-2.yaml).
+
+    TM9-8015-2 covers Power Train, Body, and Frame for the M38A1.
+    The manual has 17 chapters but chapter boundaries are not detectable in OCR text
+    (only in the TOC). L1 uses Section (Roman numeral) boundaries instead, with
+    require_known_id filtering for Roman numerals I-X plus the numeric "1" variant.
+    """
+
+    def test_production_profile_loads(self):
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert isinstance(profile, ManualProfile)
+        assert profile.manual_id == "tm9-8015-2"
+
+    def test_production_profile_validates_no_errors(self):
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        errors = validate_profile(profile)
+        assert errors == [], f"Validation errors: {errors}"
+
+    def test_production_profile_all_patterns_compile(self):
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        patterns = compile_patterns(profile)
+        for category, pattern_list in patterns.items():
+            for p in pattern_list:
+                assert isinstance(p, re.Pattern), (
+                    f"Pattern in {category} is not compiled: {p}"
+                )
+
+    def test_production_profile_known_ids_count(self):
+        """11 known section IDs (Roman numerals I-X plus numeric '1' variant)."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        known_ids = profile.hierarchy[0].known_ids
+        assert len(known_ids) == 11, (
+            f"Expected 11 known_ids, got {len(known_ids)}"
+        )
+
+    def test_production_profile_section_ids_present(self):
+        """All Roman numeral section IDs I through X are present."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        ids = {k["id"] for k in profile.hierarchy[0].known_ids}
+        expected = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+        missing = expected - ids
+        assert not missing, f"Missing section IDs: {missing}"
+
+    def test_production_profile_l1_require_known_id(self):
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].require_known_id is True
+
+    def test_production_profile_two_hierarchy_levels(self):
+        """TM9-8015-2 uses 2 levels: section (L1) and paragraph (L2). No L4."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert len(profile.hierarchy) == 2, (
+            f"Expected 2 hierarchy levels (section/paragraph), got {len(profile.hierarchy)}"
+        )
+
+    def test_production_profile_l1_is_section(self):
+        """L1 is 'section' (not 'chapter') because chapter markers are undetectable."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].name == "section"
+
+    def test_production_profile_l2_is_paragraph(self):
+        """L2 is numbered paragraph."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[1].name == "paragraph"
+
+    def test_production_profile_l1_has_gap_filter(self):
+        """L1 should have min_gap_lines to filter TOC false positives."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.hierarchy[0].min_gap_lines >= 10
+
+    def test_production_profile_ocr_quality_good(self):
+        """OCR quality should be 'good' (best of remaining TM manuals)."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.ocr_cleanup.quality_estimate == "good"
+
+    def test_production_profile_one_vehicle(self):
+        """Profile covers M38A1 only (TM9-8015-2 is power train/body/frame)."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert len(profile.vehicles) == 1
+        assert profile.vehicles[0].model == "M38A1"
+
+    def test_production_profile_has_cross_reference_patterns(self):
+        """Cross-reference patterns for paragraph refs and companion TM refs."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert len(profile.cross_reference_patterns) >= 2
+
+    def test_production_profile_no_wiring_diagrams(self):
+        """TM9-8015-2 (power train/body/frame) has no wiring diagrams."""
+        profile = load_profile(TM9_8015_2_PRODUCTION_PROFILE_PATH)
+        assert profile.content_types.wiring_diagrams.get("present") is False

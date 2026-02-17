@@ -1,0 +1,106 @@
+schema_version: "1.0"
+manual_id: "tm9-8015-2"
+manual_title: "TM 9-8015-2: Ordnance Maintenance — Power Train, Body, and Frame"
+source_url: "https://example.com/tm9-8015-2.pdf"
+source_format: "pdf-ocr"
+
+# Note: The original manual has 17 chapters, but chapter boundaries are not
+# detectable in the OCR text (the word "CHAPTER" only appears in the TOC, not
+# in body text). Standalone chapter numbers (e.g., "5" at the top of a page)
+# are indistinguishable from page numbers and figure references. Therefore,
+# L1 uses Section (Roman numeral) boundaries, which are reliably detectable.
+# The chapter structure is preserved via paragraph number ranges in the data.
+
+vehicles:
+  - model: "M38A1"
+    years: "1952-1957"
+    drive_type: ["4WD"]
+    engines:
+      - name: "F-head I4 (Hurricane)"
+        code: "F-head"
+        aliases: ["F-head", "four-cylinder", "Hurricane", "134 cubic inch"]
+    transmissions:
+      - name: "T-90 3-Speed Synchromesh"
+        code: "T-90"
+
+structure:
+  hierarchy:
+    - level: 1
+      name: "section"
+      id_pattern: "^Section\\s+([IVXLC\\d]+)\\.?"
+      title_pattern: "^Section\\s+[IVXLC\\d]+\\.?\\s+(.+)"
+      require_known_id: true
+      known_ids:
+        - { id: "I", title: "General / Description and Data" }
+        - { id: "II", title: "Various (context-dependent)" }
+        - { id: "III", title: "Various (context-dependent)" }
+        - { id: "IV", title: "Various (context-dependent)" }
+        - { id: "V", title: "Various (context-dependent)" }
+        - { id: "VI", title: "Various (context-dependent)" }
+        - { id: "VII", title: "Various (context-dependent)" }
+        - { id: "VIII", title: "Various (context-dependent)" }
+        - { id: "IX", title: "Various (context-dependent)" }
+        - { id: "X", title: "Various (context-dependent)" }
+        - { id: "1", title: "Disassembly (Ch 4 variant)" }
+      min_gap_lines: 10
+      min_content_words: 3
+    - level: 2
+      name: "paragraph"
+      id_pattern: "^(\\d+)\\.\\s"
+      title_pattern: "^\\d+\\.\\s+(.+)"
+      min_content_words: 5
+      require_blank_before: false
+  page_number:
+    pattern: "^(\\d+)$"
+    group_prefixed: false
+  step_patterns:
+    - "^([a-z])\\.\\s"
+    - "^\\((\\d+)\\)\\s"
+  figure_reference:
+    pattern: "[Ff]ig\\.?\\s+(\\d+)"
+    scope: "global"
+  cross_reference:
+    patterns:
+      - "par(?:agraph)?\\.?\\s+(\\d+[a-z]?)"
+      - "TM\\s+9-\\d{4}"
+
+safety_callouts:
+  - level: "caution"
+    pattern: "^Caution:"
+    style: "inline"
+  - level: "note"
+    pattern: "^Note[.:]"
+    style: "inline"
+
+content_types:
+  maintenance_schedule:
+    present: false
+  wiring_diagrams:
+    present: false
+  specification_tables:
+    location: "inline"
+
+ocr_cleanup:
+  quality_estimate: "good"
+  known_substitutions:
+    - { from: "WASEIN~TON", to: "WASHINGTON" }
+    - { from: ")&ton", to: "1/4-ton" }
+    - { from: "M38Al", to: "M38A1" }
+  regex_substitutions:
+    - { pattern: "\\u2019", replacement: "'" }
+    - { pattern: "\\u201c", replacement: "\"" }
+    - { pattern: "\\u201d", replacement: "\"" }
+  header_footer_patterns:
+    - "^\\*?TM\\s+9-8015"
+    - "^prod[&u].*Military.*Inc"
+    - "^THIS CD PRODUCED BY"
+    - "^MILITARY MEDIA"
+    - "^COPY\\s?RIGHT"
+  garbage_detection:
+    enabled: true
+    threshold: 0.4
+
+variants:
+  has_market_variants: false
+  variant_indicator: "none"
+  markets: ["US military"]

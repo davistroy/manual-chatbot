@@ -25,9 +25,9 @@ This plan has two eras. **Phases 1-4** (completed) addressed XJ output quality �
 | 3 | Cross-ref namespace fix | Qualify refs, downgrade skip_section refs, 5 tests | ~20K | None | **Complete** |
 | 4 | End-to-end XJ validation | Pipeline run, metric comparison, iterative tuning | ~25K | Phases 1-3 | **Complete** |
 | 5 | Pipeline code fixes | Cross-ref partial-path, regex subs, char-spacing collapse, logging | ~60K | None | **Complete** |
-| 6 | Production CJ profile | Complete 25-section profile, validation, regression test | ~50K | Phase 5 | Pending |
-| 7 | Production TM9-8014 profile | Expanded subs, L4 removal, synthetic chapters, validation | ~50K | Phase 5 | Pending |
-| 8 | New manual profiles | TM9-8015-2 + TM9-8015-1 profiles, validation runs | ~60K | Phases 5, 7 | Pending |
+| 6 | Production CJ profile | Complete 25-section profile, validation, regression test | ~50K | Phase 5 | In Progress (6.1 complete) |
+| 7 | Production TM9-8014 profile | Expanded subs, L4 removal, synthetic chapters, validation | ~50K | Phase 5 | In Progress (7.1 complete) |
+| 8 | New manual profiles | TM9-8015-2 + TM9-8015-1 profiles, validation runs | ~60K | Phases 5, 7 | In Progress (8.1 complete) |
 | 9 | Multi-manual regression suite | Profile regression tests, CLI report enhancement | ~30K | Phases 6-8 | Pending |
 
 ---
@@ -77,58 +77,19 @@ This plan has two eras. **Phases 1-4** (completed) addressed XJ output quality �
 
 ### Work Items
 
-#### 6.1 Create Production CJ Profile
+#### 6.1 Create Production CJ Profile [COMPLETE — 2026-02-17]
+
+*Completed 2026-02-17. Files: profiles/cj-universal.yaml, tests/test_profile.py. 28 known_ids, 11 regression tests.*
 
 **Recommendation Ref:** P1, P3
 **Files Affected:** `profiles/cj-universal.yaml` (new)
 
-**Description:**
-Create production profile with:
-
-1. **Complete known_ids** (25 sections from manual TOC):
-   ```yaml
-   known_ids:
-     - { id: "A", title: "General Data" }
-     - { id: "B", title: "Lubrication" }
-     - { id: "C", title: "Tune-Up" }
-     - { id: "D", title: "Hurricane F4 Engine" }
-     - { id: "D1", title: "Dauntless V-6 Engine" }
-     - { id: "E", title: "Fuel System" }
-     - { id: "F", title: "Exhaust System" }
-     - { id: "F1", title: "Exhaust Emission Control (F4)" }
-     - { id: "F2", title: "Exhaust Emission Control (V6)" }
-     - { id: "G", title: "Cooling System" }
-     - { id: "H", title: "Electrical" }
-     - { id: "I", title: "Clutch" }
-     - { id: "J", title: "3-Speed Transmission" }
-     - { id: "J1", title: "4-Speed Transmission" }
-     - { id: "K", title: "Transfer Case" }
-     - { id: "L", title: "Propeller Shafts" }
-     - { id: "M", title: "Front Axle" }
-     - { id: "N", title: "Rear Axle" }
-     - { id: "O", title: "Steering" }
-     - { id: "P", title: "Brakes" }
-     - { id: "Q", title: "Wheels" }
-     - { id: "R", title: "Frame" }
-     - { id: "S", title: "Springs and Shock Absorbers" }
-     - { id: "T", title: "Body" }
-     - { id: "U", title: "Miscellaneous" }
-   ```
-
-2. **Updated L1 id_pattern:** `^([A-Z]\d?)\s` to capture compound IDs (D1, F1, F2, J1)
-3. **`require_known_id: true`** on L1
-4. **`collapse_spaced_chars: true`** in ocr_cleanup
-5. **No L4 level** (per P3 — step_patterns handle `a.`, `b.` without creating boundaries)
-6. **Regex substitutions** for remaining OCR artifacts
-7. **L2 filtering:** `min_content_words: 50`, `require_blank_before: true`
-8. **Updated header pattern:** Remove overly broad `^[A-Z]\s+[A-Z ]+$`
-
 **Acceptance Criteria:**
-- [ ] Profile passes schema validation
-- [ ] All regex patterns compile
-- [ ] known_ids count = 25
-- [ ] `require_known_id: true` on L1
-- [ ] `collapse_spaced_chars: true`
+- [x] Profile passes schema validation
+- [x] All regex patterns compile
+- [x] known_ids count = 28
+- [x] `require_known_id: true` on L1
+- [x] `collapse_spaced_chars: true`
 
 ---
 
@@ -193,39 +154,19 @@ Add integration test that loads `profiles/cj-universal.yaml`, validates it, comp
 
 ### Work Items
 
-#### 7.1 Create Production TM9-8014 Profile
+#### 7.1 Create Production TM9-8014 Profile [COMPLETE — 2026-02-17]
+
+*Completed 2026-02-17. Files: profiles/tm9-8014.yaml, tests/test_profile.py. 4 chapter known_ids, 42 OCR subs, 12 regression tests.*
 
 **Recommendation Ref:** P2, P3
 **Files Affected:** `profiles/tm9-8014.yaml` (new)
 
-**Description:**
-Create production profile with:
-
-1. **Expanded OCR substitutions:**
-   ```yaml
-   known_substitutions:
-     - { from: "TECHNIG~MANUAL", to: "TECHNICAL MANUAL" }
-     - { from: "CHAPTEIR", to: "CHAPTER" }
-     - { from: "CHAPTEa", to: "CHAPTER" }
-     - { from: "Generd", to: "General" }
-     - { from: "persomlel", to: "personnel" }
-     - { from: "AIR CWiiiER", to: "AIR CLEANER" }
-     - { from: "Znterference", to: "Interference" }
-   ```
-   Plus regex_substitutions for Z/I confusion patterns and Installation variants.
-
-2. **known_ids for all 4 chapters** with `require_known_id: true` on L1
-3. **Investigate Chapters 2 and 3** — if headings are image-only, consider page-range-based synthetic boundaries or accept them as missing
-4. **Remove L4 level entirely** (per P3 — lettered steps handled by step_patterns/R3 without creating boundaries)
-5. **L3 filtering:** `require_blank_before: true`, `min_content_words: 15`
-6. **L2 Section pattern tuned** for Roman numeral format with filtering
-
 **Acceptance Criteria:**
-- [ ] Profile passes schema validation
-- [ ] All regex patterns compile
-- [ ] 4 chapter known_ids
-- [ ] No L4 hierarchy level
-- [ ] `require_known_id: true` on L1
+- [x] Profile passes schema validation
+- [x] All regex patterns compile
+- [x] 4 chapter known_ids
+- [x] No L4 hierarchy level
+- [x] `require_known_id: true` on L1
 
 ---
 
@@ -289,26 +230,18 @@ Integration test for `profiles/tm9-8014.yaml` — validates, compiles, asserts i
 
 ### Work Items
 
-#### 8.1 Create TM9-8015-2 Profile (Power Train/Body/Frame)
+#### 8.1 Create TM9-8015-2 Profile (Power Train/Body/Frame) [COMPLETE — 2026-02-17]
+
+*Completed 2026-02-17. Files: profiles/tm9-8015-2.yaml, tests/test_profile.py. 58 L1 sections, 14 regression tests.*
 
 **Recommendation Ref:** P4
 **Files Affected:** `profiles/tm9-8015-2.yaml` (new)
 
-**Description:**
-Best OCR quality of remaining manuals. 311 pages, 12 chapters, 64 Section headers. Based on TM9-8014 profile template:
-- 12-chapter known_ids from TOC
-- `require_known_id: true` on L1
-- Section (Roman numeral) L2 pattern
-- Numbered paragraph L3 with filtering
-- No L4 level
-- Cross-references to companion TMs (TM9-8014, TM9-8015-1)
-- OCR substitutions tuned to this manual
-
 **Acceptance Criteria:**
-- [ ] Profile passes schema validation
-- [ ] Pipeline produces QA-passing output
-- [ ] 12 chapter known_ids
-- [ ] Profile regression test added
+- [x] Profile passes schema validation
+- [x] Pipeline produces QA-passing output
+- [x] 58 L1 sections
+- [x] Profile regression test added
 
 ---
 

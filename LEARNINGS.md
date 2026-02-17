@@ -33,3 +33,9 @@ Issues encountered and solutions discovered during implementation.
 
 - All 4 Phase 5 work items (cross-ref partial-path, regex substitutions, character-spacing collapse, per-pass filter logging) ran in parallel with no merge conflicts — different files or sufficiently isolated functions within shared files
 - All 465 tests pass after Phase 5 completion
+
+## Production Profile Creation Round (2026-02-17)
+
+- All 3 profile agents (6.1 CJ universal, 7.1 TM9-8014, 8.1 TM9-8015-2) ran in parallel with no merge conflicts — each creates a new YAML profile and appends tests to test_profile.py in non-overlapping test classes
+- Each profile required iterative tuning against real PDFs: TOC false positives needed known_ids filtering, OCR artifacts required manual-specific substitution lists, and boundary post-filters (min_gap_lines, min_content_words, require_blank_before) needed per-manual calibration
+- 502 tests pass after all 3 profiles completed (up from 465 after Phase 5)

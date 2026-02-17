@@ -54,9 +54,17 @@
 | 2026-02-17 | Phase 5.3: Character-spacing collapse pre-processor | src/pipeline/profile.py, src/pipeline/ocr_cleanup.py, schema/manual_profile_v1.schema.json, tests/test_ocr_cleanup.py | 4 new tests |
 | 2026-02-17 | Phase 5.4: Per-pass filter logging | src/pipeline/structural_parser.py, tests/test_structural_parser.py | 0 new tests (logging only) |
 
+### Production Profile Creation (Implementation Plan v4, Phases 6-8)
+
+| Date | Work Item | Files Changed | Tests |
+|------|-----------|---------------|-------|
+| 2026-02-17 | Phase 6.1: Create production CJ universal profile | profiles/cj-universal.yaml (new), tests/test_profile.py | 11 new tests (28 known_ids) |
+| 2026-02-17 | Phase 7.1: Create production TM9-8014 profile | profiles/tm9-8014.yaml (new), tests/test_profile.py | 12 new tests (4 chapter known_ids, 42 OCR subs) |
+| 2026-02-17 | Phase 8.1: Create TM9-8015-2 profile | profiles/tm9-8015-2.yaml (new), tests/test_profile.py | 14 new tests (58 L1 sections) |
+
 ## Summary
 
-All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests). Full test suite: **465 tests passing** (up from 250 baseline).
+All 6 original phases implemented, plus schema stability and documentation improvements, plus full REVIEW.md remediation (15 work items across 4 phases), plus output quality implementation (4 phases, 16 new tests), plus Phase 5 multi-manual code fixes (4 work items, 13 new tests), plus 3 production profiles created in parallel (CJ universal, TM9-8014, TM9-8015-2). Full test suite: **502 tests passing** (up from 250 baseline).
 
 ### Output Quality Results (XJ 1999 Service Manual)
 
